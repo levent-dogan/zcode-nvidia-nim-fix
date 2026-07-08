@@ -49,6 +49,7 @@ if ($DebugMode.IsPresent) {
 }
 
 Write-Host "Starting ZCode NVIDIA NIM proxy on http://127.0.0.1:8787/v1"
+Write-Host "Author: Levent Dogan"
 Write-Host "Plain-text tool_call handling mode: $ToolCallTextMode"
 Write-Host "API key mode: $NormalizedApiKeyMode"
 if ($DebugMode.IsPresent) {
