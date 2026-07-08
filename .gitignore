@@ -13,6 +13,7 @@ Backup/
 screenshot/*
 !screenshot/
 !screenshot/screenshot_1.png
+!screenshot/screenshot_2.png
 
 .env
 .env.*

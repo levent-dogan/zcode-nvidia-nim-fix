@@ -28,6 +28,10 @@ The proxy running in `Client` API key mode with debug-safe logging:
 
 ![ZCode NVIDIA NIM proxy running in client API key mode](screenshot/screenshot_1.png)
 
+ZCode custom provider configuration using the local proxy URL:
+
+![ZCode custom provider configured with the local NVIDIA NIM proxy](screenshot/screenshot_2.png)
+
 ## Requirements
 
 - Windows 10/11
