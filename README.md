@@ -22,6 +22,12 @@ No NVIDIA API keys are stored in this repository. Do not commit real keys, `.env
 - Supports one API key through `NVIDIA_API_KEY` or multiple keys through ZCode provider API key fields.
 - Does not print API keys or full message content.
 
+## Screenshot
+
+The proxy running in `Client` API key mode with debug-safe logging:
+
+![ZCode NVIDIA NIM proxy running in client API key mode](screenshot/screenshot_1.png)
+
 ## Requirements
 
 - Windows 10/11

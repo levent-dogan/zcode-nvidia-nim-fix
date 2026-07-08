@@ -10,7 +10,9 @@ __pycache__/
 dist/
 build/
 Backup/
-screenshot/
+screenshot/*
+!screenshot/
+!screenshot/screenshot_1.png
 
 .env
 .env.*
