@@ -6,6 +6,7 @@ from nvidia_nim_proxy.sanitizer import ProviderContext, sanitize_chat_completion
 from nvidia_nim_proxy.server import (
     API_KEY_MODE_CLIENT,
     API_KEY_MODE_ENV,
+    DEFAULT_UPSTREAM_TIMEOUT_SECONDS,
     TOOL_CALL_TEXT_DIAGNOSTIC,
     ProxyConfig,
     build_tool_call_text_diagnostic_response,
@@ -80,6 +81,26 @@ def test_build_upstream_request_rejects_invalid_base_url() -> None:
             {"model": "z-ai/glm-5.2", "messages": []},
             ProxyConfig(upstream_base_url="not-a-url", api_key="secret-test-key"),
         )
+
+
+def test_proxy_config_defaults_to_extended_upstream_timeout() -> None:
+    config = ProxyConfig(
+        upstream_base_url="https://integrate.api.nvidia.com/v1",
+        api_key="env-secret",
+    )
+
+    assert config.upstream_timeout_seconds == DEFAULT_UPSTREAM_TIMEOUT_SECONDS
+    assert config.upstream_timeout_seconds == 300
+
+
+def test_proxy_config_accepts_custom_upstream_timeout() -> None:
+    config = ProxyConfig(
+        upstream_base_url="https://integrate.api.nvidia.com/v1",
+        api_key="env-secret",
+        upstream_timeout_seconds=600,
+    )
+
+    assert config.upstream_timeout_seconds == 600
 
 
 def test_extracts_client_bearer_token_without_logging_key() -> None:

@@ -19,6 +19,7 @@ from nvidia_nim_proxy.sanitizer import ProviderContext, sanitize_chat_completion
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
 DEFAULT_UPSTREAM_BASE_URL = "https://integrate.api.nvidia.com/v1"
+DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
 STREAM_CHUNK_SIZE = 8192
 STREAM_DIAGNOSTIC_SCAN_BYTES = 64 * 1024
@@ -54,11 +55,13 @@ class ProxyConfig:
         api_key: str | None,
         tool_call_text_mode: str = "diagnostic",
         api_key_mode: str = API_KEY_MODE_ENV,
+        upstream_timeout_seconds: int = DEFAULT_UPSTREAM_TIMEOUT_SECONDS,
     ) -> None:
         self.upstream_base_url = upstream_base_url.rstrip("/")
         self.api_key = api_key
         self.tool_call_text_mode = tool_call_text_mode
         self.api_key_mode = api_key_mode
+        self.upstream_timeout_seconds = upstream_timeout_seconds
 
 
 @dataclass(frozen=True)
@@ -340,7 +343,10 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             return
 
         connection_cls = http.client.HTTPSConnection if upstream_request.use_tls else http.client.HTTPConnection
-        connection = connection_cls(upstream_request.netloc, timeout=120)
+        connection = connection_cls(
+            upstream_request.netloc,
+            timeout=self.config.upstream_timeout_seconds,
+        )
         try:
             connection.request(
                 "POST",
@@ -351,10 +357,19 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             upstream_response = connection.getresponse()
             self._relay_upstream_response(upstream_response, stream=upstream_request.stream)
         except TimeoutError:
-            logger.exception("Timed out while forwarding request to NVIDIA NIM")
+            logger.error(
+                "Timed out while waiting for NVIDIA NIM after %s seconds; model=%r stream=%r",
+                self.config.upstream_timeout_seconds,
+                body.get("model"),
+                body.get("stream"),
+            )
             self._send_json(504, {"error": "upstream timeout"})
         except OSError:
-            logger.exception("Failed to forward request to NVIDIA NIM")
+            logger.error(
+                "Failed to forward request to NVIDIA NIM; model=%r stream=%r",
+                body.get("model"),
+                body.get("stream"),
+            )
             self._send_json(502, {"error": "upstream request failed"})
         finally:
             connection.close()
@@ -503,6 +518,17 @@ def parse_args() -> argparse.Namespace:
             "Authorization bearer token from each ZCode provider."
         ),
     )
+    parser.add_argument(
+        "--upstream-timeout-seconds",
+        type=int,
+        default=int(
+            os.getenv(
+                "NIM_PROXY_UPSTREAM_TIMEOUT_SECONDS",
+                str(DEFAULT_UPSTREAM_TIMEOUT_SECONDS),
+            )
+        ),
+        help="Seconds to wait for NVIDIA NIM to start responding before returning 504.",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug-safe request logging.")
     return parser.parse_args()
 
@@ -517,18 +543,22 @@ def main() -> None:
     api_key = os.getenv("NVIDIA_API_KEY")
     if args.api_key_mode == API_KEY_MODE_ENV and not api_key:
         raise SystemExit("NVIDIA_API_KEY is required")
+    if args.upstream_timeout_seconds <= 0:
+        raise SystemExit("--upstream-timeout-seconds must be greater than 0")
 
     config = ProxyConfig(
         upstream_base_url=args.upstream_base_url,
         api_key=api_key,
         tool_call_text_mode=args.tool_call_text_mode,
         api_key_mode=args.api_key_mode,
+        upstream_timeout_seconds=args.upstream_timeout_seconds,
     )
     server = build_server(args.host, args.port, config)
     logger.info("Listening on http://%s:%s/v1", args.host, args.port)
     logger.info("Forwarding sanitized requests to %s", args.upstream_base_url)
     logger.info("Plain-text tool_call handling mode: %s", args.tool_call_text_mode)
     logger.info("API key mode: %s", args.api_key_mode)
+    logger.info("Upstream timeout: %s seconds", args.upstream_timeout_seconds)
 
     try:
         server.serve_forever()

@@ -232,6 +232,12 @@ Multiple-key mode:
 .\run_proxy.ps1 -ApiKeyMode Client -DebugMode
 ```
 
+Increase NVIDIA upstream wait time for long or slow responses:
+
+```powershell
+.\run_proxy.ps1 -ApiKeyMode Client -DebugMode -UpstreamTimeoutSeconds 600
+```
+
 Pass raw upstream tool-call-looking text instead of readable diagnostics:
 
 ```powershell
@@ -337,6 +343,44 @@ http://127.0.0.1:8787/v1
 
 Put a different NVIDIA API key in each provider's `API key` field. This spreads requests across your keys instead of sending every provider through one `NVIDIA_API_KEY` environment value.
 
+## Troubleshooting HTTP 504
+
+If ZCode shows:
+
+```text
+Gateway Timeout
+status=504
+retryable=true
+```
+
+or the proxy log shows:
+
+```text
+Timed out while waiting for NVIDIA NIM after 300 seconds
+```
+
+the local proxy sent the request to NVIDIA NIM, but NVIDIA did not start an HTTP response before the proxy timeout. This is different from the original `extra_body` validation error.
+
+Common causes:
+
+- NVIDIA NIM is slow or queued for the selected model.
+- The prompt is large or the requested output is long.
+- ZCode retried several long-running requests.
+- The selected model is under load.
+
+Recommended actions:
+
+- Retry with a shorter prompt first.
+- Try another NVIDIA NIM model.
+- Keep `-ApiKeyMode Client` enabled if you have multiple keys.
+- Increase the upstream timeout when you expect long responses:
+
+```powershell
+.\run_proxy.ps1 -ApiKeyMode Client -DebugMode -UpstreamTimeoutSeconds 600
+```
+
+If ZCode has its own shorter client-side timeout, increasing the proxy timeout cannot fully solve that. In that case, use smaller prompts or a faster model.
+
 ## Development Checks
 
 Install developer tools if needed:
@@ -368,6 +412,7 @@ python -m mypy nvidia_nim_proxy tests
 | `NIM_PROXY_UPSTREAM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | OpenAI-compatible NVIDIA NIM base URL |
 | `NIM_PROXY_TOOL_CALL_TEXT_MODE` | `diagnostic` | Use `diagnostic` for readable tool-call leak messages or `pass` for raw upstream output |
 | `NIM_PROXY_API_KEY_MODE` | `env` | Use `env` for `NVIDIA_API_KEY` or `client` to forward each ZCode provider key |
+| `NIM_PROXY_UPSTREAM_TIMEOUT_SECONDS` | `300` | Seconds to wait for NVIDIA NIM to start responding before returning `504` |
 
 ## Security And Privacy
 

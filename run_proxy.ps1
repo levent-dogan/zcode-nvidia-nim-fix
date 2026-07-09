@@ -6,7 +6,10 @@ param(
     [string]$ToolCallTextMode = "diagnostic",
 
     [ValidateSet("Env", "Client")]
-    [string]$ApiKeyMode = "Env"
+    [string]$ApiKeyMode = "Env",
+
+    [ValidateRange(1, 3600)]
+    [int]$UpstreamTimeoutSeconds = 300
 )
 
 Set-StrictMode -Version Latest
@@ -42,7 +45,9 @@ $PythonArgs = @(
     "--tool-call-text-mode",
     $ToolCallTextMode,
     "--api-key-mode",
-    $NormalizedApiKeyMode
+    $NormalizedApiKeyMode,
+    "--upstream-timeout-seconds",
+    $UpstreamTimeoutSeconds
 )
 if ($DebugMode.IsPresent) {
     $PythonArgs += "--debug"
@@ -52,6 +57,7 @@ Write-Host "Starting ZCode NVIDIA NIM proxy on http://127.0.0.1:8787/v1"
 Write-Host "Author: Levent Dogan" -ForegroundColor Cyan
 Write-Host "Plain-text tool_call handling mode: $ToolCallTextMode"
 Write-Host "API key mode: $NormalizedApiKeyMode"
+Write-Host "Upstream timeout: $UpstreamTimeoutSeconds seconds"
 if ($DebugMode.IsPresent) {
     Write-Host "Debug-safe logging enabled. API keys and full message content are not printed by the proxy."
 }
