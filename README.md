@@ -381,6 +381,22 @@ Recommended actions:
 
 If ZCode has its own shorter client-side timeout, increasing the proxy timeout cannot fully solve that. In that case, use smaller prompts or a faster model.
 
+## Troubleshooting Client Disconnect Logs
+
+If the console shows a Windows client disconnect such as:
+
+```text
+ConnectionAbortedError: [WinError 10053]
+```
+
+ZCode closed the local HTTP connection before the proxy could send its final timeout/error response. This can happen after a long NVIDIA NIM wait. The proxy now suppresses the Python traceback and logs a short message instead:
+
+```text
+Client disconnected before JSON response could be sent
+```
+
+This is not an API key leak and usually does not mean the proxy crashed.
+
 ## Development Checks
 
 Install developer tools if needed:

@@ -1,4 +1,5 @@
 import json
+from typing import Any, cast
 
 import pytest
 
@@ -7,6 +8,7 @@ from nvidia_nim_proxy.server import (
     API_KEY_MODE_CLIENT,
     API_KEY_MODE_ENV,
     DEFAULT_UPSTREAM_TIMEOUT_SECONDS,
+    NIMProxyHandler,
     TOOL_CALL_TEXT_DIAGNOSTIC,
     ProxyConfig,
     build_tool_call_text_diagnostic_response,
@@ -183,6 +185,41 @@ def test_builds_readable_stream_tool_call_diagnostic_response() -> None:
     assert TOOL_CALL_TEXT_DIAGNOSTIC in response
     assert "data: [DONE]" in response
     assert "<tool_call>" not in response
+
+
+def test_send_json_suppresses_client_disconnect() -> None:
+    class DisconnectedHandler:
+        def send_response(self, _status_code: int) -> None:
+            raise ConnectionAbortedError("client closed")
+
+        def send_header(self, _name: str, _value: str) -> None:
+            raise AssertionError("send_header should not be reached")
+
+        def end_headers(self) -> None:
+            raise AssertionError("end_headers should not be reached")
+
+    NIMProxyHandler._send_json(
+        cast(Any, DisconnectedHandler()),
+        504,
+        {"error": "upstream timeout"},
+    )
+
+
+def test_send_diagnostic_suppresses_client_disconnect() -> None:
+    class DisconnectedHandler:
+        def send_response(self, _status_code: int) -> None:
+            raise ConnectionAbortedError("client closed")
+
+        def send_header(self, _name: str, _value: str) -> None:
+            raise AssertionError("send_header should not be reached")
+
+        def end_headers(self) -> None:
+            raise AssertionError("end_headers should not be reached")
+
+    NIMProxyHandler._send_tool_call_text_diagnostic(
+        cast(Any, DisconnectedHandler()),
+        stream=True,
+    )
 
 
 def test_stream_prefix_scan_detects_tool_call_text_leak() -> None:

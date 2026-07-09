@@ -33,6 +33,7 @@ HOP_BY_HOP_RESPONSE_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
 TOOL_CALL_LEAK_MARKERS = (b"<tool_call", b"</tool_call", b"&lt;tool_call", b"&lt;/tool_call")
 API_KEY_MODE_ENV = "env"
 API_KEY_MODE_CLIENT = "client"
@@ -286,7 +287,13 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             sanitized.stripped_keys,
         )
 
-        self._forward_to_nim(sanitized.body, client_authorization=self.headers.get("Authorization"))
+        try:
+            self._forward_to_nim(
+                sanitized.body,
+                client_authorization=self.headers.get("Authorization"),
+            )
+        except CLIENT_DISCONNECT_ERRORS:
+            logger.info("Client disconnected before proxy response completed")
 
     def log_message(self, fmt: str, *args: Any) -> None:
         logger.info("%s - %s", self.client_address[0], fmt % args)
@@ -464,24 +471,30 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
         response_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(response_body)))
-        self.end_headers()
-        self.wfile.write(response_body)
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+        except CLIENT_DISCONNECT_ERRORS:
+            logger.info("Client disconnected before JSON response could be sent; status=%s", status_code)
 
     def _send_tool_call_text_diagnostic(self, *, stream: bool) -> None:
         response_body = build_tool_call_text_diagnostic_response(stream=stream)
-        self.send_response(200)
-        self.send_header("Cache-Control", "no-cache")
-        if stream:
-            self.send_header("Content-Type", "text/event-stream")
-        else:
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(response_body)))
-        self.end_headers()
-        self.wfile.write(response_body)
-        self.wfile.flush()
+        try:
+            self.send_response(200)
+            self.send_header("Cache-Control", "no-cache")
+            if stream:
+                self.send_header("Content-Type", "text/event-stream")
+            else:
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+            self.wfile.flush()
+        except CLIENT_DISCONNECT_ERRORS:
+            logger.info("Client disconnected before diagnostic response could be sent")
 
 
 def build_server(host: str, port: int, config: ProxyConfig) -> ThreadingHTTPServer:
