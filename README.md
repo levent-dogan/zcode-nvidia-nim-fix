@@ -460,4 +460,4 @@ The search may find documentation placeholders such as `NVIDIA_API_KEY`; it shou
 
 This project follows semantic versioning.
 
-Current version: `0.1.0`.
+Current version: `0.1.1`.
