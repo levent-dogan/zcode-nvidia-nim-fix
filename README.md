@@ -12,6 +12,18 @@ ZCode can send provider-extension fields such as `extra_body`. NVIDIA NIM reject
 
 No NVIDIA API keys are stored in this repository. Do not commit real keys, `.env` files, screenshots with visible keys, or private provider names.
 
+## Use Cases And Keywords
+
+This repository is intended for users searching for:
+
+- ZCode NVIDIA NIM compatibility fix
+- ZCode `extra_body` unsupported parameter error
+- NVIDIA NIM OpenAI-compatible local proxy
+- `z-ai/glm-5.2` with ZCode
+- GLM 5.2 NVIDIA NIM `/chat/completions`
+- Windows PowerShell launcher for NVIDIA NIM proxy
+- Multiple NVIDIA API keys with ZCode custom providers
+
 ## What This Proxy Does
 
 - Listens locally at `http://127.0.0.1:8787/v1`.
