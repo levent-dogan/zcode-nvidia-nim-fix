@@ -232,11 +232,19 @@ Multiple-key mode:
 .\run_proxy.ps1 -ApiKeyMode Client -DebugMode
 ```
 
-Increase NVIDIA upstream wait time for long or slow responses:
+Recommended multiple-key mode for normal daily use:
+
+```powershell
+.\run_proxy.ps1 -ApiKeyMode Client -UpstreamTimeoutSeconds 600
+```
+
+Recommended multiple-key mode while troubleshooting:
 
 ```powershell
 .\run_proxy.ps1 -ApiKeyMode Client -DebugMode -UpstreamTimeoutSeconds 600
 ```
+
+Use `-DebugMode` when you are checking stripped keys, HTTP status codes, timeout behavior, or ZCode provider problems. For normal daily use, leave `-DebugMode` off to keep the console quieter. API keys and full message content are not printed by the proxy in either mode.
 
 Pass raw upstream tool-call-looking text instead of readable diagnostics:
 
