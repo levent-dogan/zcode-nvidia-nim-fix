@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import ipaddress
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from nvidia_nim_proxy import __version__
 from nvidia_nim_proxy.sanitizer import ProviderContext, sanitize_chat_completion_body
 
 
@@ -22,7 +24,8 @@ DEFAULT_UPSTREAM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
 STREAM_CHUNK_SIZE = 8192
-STREAM_DIAGNOSTIC_SCAN_BYTES = 64 * 1024
+STREAM_DIAGNOSTIC_SCAN_BYTES = 8 * 1024
+STREAM_DIAGNOSTIC_SCAN_EVENTS = 8
 HOP_BY_HOP_RESPONSE_HEADERS = {
     "connection",
     "keep-alive",
@@ -84,6 +87,61 @@ class StreamPrefixScan:
     buffered: bytes
     tool_call_text_leak: bool
     upstream_exhausted: bool
+
+
+class NIMProxyServer(ThreadingHTTPServer):
+    """Threaded local server that does not block shutdown on active requests."""
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def positive_int(value: str) -> int:
+    """Parse a positive integer for argparse with a readable error."""
+
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return parsed
+
+
+def valid_port(value: str) -> int:
+    """Parse a valid TCP port for argparse."""
+
+    parsed = positive_int(value)
+    if parsed > 65535:
+        raise argparse.ArgumentTypeError("must be between 1 and 65535")
+    return parsed
+
+
+def is_loopback_host(host: str) -> bool:
+    """Return true only for explicit localhost or loopback IP bindings."""
+
+    normalized = host.strip().lower()
+    if normalized == "localhost":
+        return True
+
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_bind_security(host: str, *, allow_remote: bool, api_key_mode: str) -> None:
+    """Reject unsafe network exposure of the environment-backed API key."""
+
+    if is_loopback_host(host):
+        return
+    if not allow_remote:
+        raise ValueError(
+            "refusing non-loopback bind without --allow-remote; use 127.0.0.1 or localhost"
+        )
+    if api_key_mode == API_KEY_MODE_ENV:
+        raise ValueError("remote binding is not allowed with env API key mode; use client mode")
 
 
 def extract_bearer_token(authorization_header: str | None) -> str | None:
@@ -153,12 +211,53 @@ def contains_tool_call_text_leak(payload: bytes) -> bool:
     return any(marker in lower_payload for marker in TOOL_CALL_LEAK_MARKERS)
 
 
+def parse_completed_sse_events(payload: bytes) -> list[bytes]:
+    """Return complete SSE events using normalized line endings."""
+
+    normalized = payload.replace(b"\r\n", b"\n")
+    parts = normalized.split(b"\n\n")
+    return [event for event in parts[:-1] if event.strip()]
+
+
+def contains_tool_call_text_leak_in_sse(payload: bytes) -> bool:
+    """Detect a tool-call text marker even when content spans SSE events."""
+
+    content_fragments: list[str] = []
+    for event in parse_completed_sse_events(payload):
+        for line in event.splitlines():
+            if not line.startswith(b"data:"):
+                continue
+            data = line.removeprefix(b"data:").strip()
+            if not data or data == b"[DONE]":
+                continue
+            try:
+                decoded = json.loads(data)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(decoded, dict):
+                continue
+            choices = decoded.get("choices")
+            if not isinstance(choices, list):
+                continue
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                delta = choice.get("delta")
+                if not isinstance(delta, dict):
+                    continue
+                content = delta.get("content")
+                if isinstance(content, str):
+                    content_fragments.append(content)
+
+    return contains_tool_call_text_leak("".join(content_fragments).encode("utf-8"))
+
+
 def read_stream_prefix_for_tool_call_detection(
     read_chunk: Callable[[int], bytes],
     *,
     max_scan_bytes: int = STREAM_DIAGNOSTIC_SCAN_BYTES,
 ) -> StreamPrefixScan:
-    """Read a bounded stream prefix so normal streams are not fully buffered."""
+    """Read at most the first SSE event without delaying the full stream."""
 
     buffered = bytearray()
 
@@ -173,10 +272,19 @@ def read_stream_prefix_for_tool_call_detection(
             )
 
         buffered.extend(chunk)
-        if contains_tool_call_text_leak(bytes(buffered)):
+        buffered_bytes = bytes(buffered)
+        if contains_tool_call_text_leak(buffered_bytes) or contains_tool_call_text_leak_in_sse(
+            buffered_bytes
+        ):
             return StreamPrefixScan(
                 buffered=bytes(buffered),
                 tool_call_text_leak=True,
+                upstream_exhausted=False,
+            )
+        if len(parse_completed_sse_events(buffered_bytes)) >= STREAM_DIAGNOSTIC_SCAN_EVENTS:
+            return StreamPrefixScan(
+                buffered=bytes(buffered),
+                tool_call_text_leak=False,
                 upstream_exhausted=False,
             )
 
@@ -246,12 +354,19 @@ def build_tool_call_text_diagnostic_response(*, stream: bool) -> bytes:
 class NIMProxyHandler(BaseHTTPRequestHandler):
     """HTTP handler that accepts OpenAI-compatible requests and forwards to NIM."""
 
-    server_version = "ZCodeNIMProxy/0.1"
+    server_version = f"ZCodeNIMProxy/{__version__}"
     config: ProxyConfig
 
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
         if self.path == "/health":
-            self._send_json(200, {"status": "ok", "upstream": self.config.upstream_base_url})
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "version": __version__,
+                    "upstream": self.config.upstream_base_url,
+                },
+            )
             return
 
         self._send_json(404, {"error": "not_found"})
@@ -363,6 +478,8 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             )
             upstream_response = connection.getresponse()
             self._relay_upstream_response(upstream_response, stream=upstream_request.stream)
+        except CLIENT_DISCONNECT_ERRORS:
+            raise
         except TimeoutError:
             logger.error(
                 "Timed out while waiting for NVIDIA NIM after %s seconds; model=%r stream=%r",
@@ -410,7 +527,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             return
 
         if self.config.tool_call_text_mode == "diagnostic" and 200 <= upstream_response.status < 300:
-            prefix_scan = read_stream_prefix_for_tool_call_detection(upstream_response.read)
+            prefix_scan = read_stream_prefix_for_tool_call_detection(upstream_response.read1)
             if prefix_scan.tool_call_text_leak:
                 logger.warning(
                     "Streaming response contains plain-text tool_call tags. "
@@ -429,7 +546,10 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
             if not prefix_scan.upstream_exhausted:
-                self._relay_remaining_stream(upstream_response, warn_on_tool_call_text=True)
+                self._relay_remaining_stream_after_headers(
+                    upstream_response,
+                    warn_on_tool_call_text=True,
+                )
 
             self.close_connection = True
             return
@@ -440,7 +560,10 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                 self.send_header(header, value)
         self.end_headers()
 
-        self._relay_remaining_stream(upstream_response, warn_on_tool_call_text=True)
+        self._relay_remaining_stream_after_headers(
+            upstream_response,
+            warn_on_tool_call_text=True,
+        )
 
         self.close_connection = True
 
@@ -453,7 +576,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
         tool_call_warning_logged = False
 
         while True:
-            chunk = upstream_response.read(STREAM_CHUNK_SIZE)
+            chunk = upstream_response.read1(STREAM_CHUNK_SIZE)
             if not chunk:
                 break
             if (
@@ -468,6 +591,23 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                 tool_call_warning_logged = True
             self.wfile.write(chunk)
             self.wfile.flush()
+
+    def _relay_remaining_stream_after_headers(
+        self,
+        upstream_response: http.client.HTTPResponse,
+        *,
+        warn_on_tool_call_text: bool,
+    ) -> None:
+        """Relay an established stream without attempting a second HTTP status."""
+
+        try:
+            self._relay_remaining_stream(
+                upstream_response,
+                warn_on_tool_call_text=warn_on_tool_call_text,
+            )
+        except TimeoutError:
+            logger.error("NVIDIA NIM stream stalled after the response started; closing connection")
+            self.close_connection = True
 
     def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
         response_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -497,20 +637,24 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             logger.info("Client disconnected before diagnostic response could be sent")
 
 
-def build_server(host: str, port: int, config: ProxyConfig) -> ThreadingHTTPServer:
+def build_server(host: str, port: int, config: ProxyConfig) -> NIMProxyServer:
     """Build a configured HTTP server instance."""
 
     class ConfiguredNIMProxyHandler(NIMProxyHandler):
         pass
 
     ConfiguredNIMProxyHandler.config = config
-    return ThreadingHTTPServer((host, port), ConfiguredNIMProxyHandler)
+    return NIMProxyServer((host, port), ConfiguredNIMProxyHandler)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the ZCode NVIDIA NIM compatibility proxy.")
     parser.add_argument("--host", default=os.getenv("NIM_PROXY_HOST", DEFAULT_HOST))
-    parser.add_argument("--port", type=int, default=int(os.getenv("NIM_PROXY_PORT", str(DEFAULT_PORT))))
+    parser.add_argument(
+        "--port",
+        type=valid_port,
+        default=os.getenv("NIM_PROXY_PORT", str(DEFAULT_PORT)),
+    )
     parser.add_argument(
         "--upstream-base-url",
         default=os.getenv("NIM_PROXY_UPSTREAM_BASE_URL", DEFAULT_UPSTREAM_BASE_URL),
@@ -533,14 +677,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--upstream-timeout-seconds",
-        type=int,
-        default=int(
-            os.getenv(
-                "NIM_PROXY_UPSTREAM_TIMEOUT_SECONDS",
-                str(DEFAULT_UPSTREAM_TIMEOUT_SECONDS),
-            )
+        type=positive_int,
+        default=os.getenv(
+            "NIM_PROXY_UPSTREAM_TIMEOUT_SECONDS",
+            str(DEFAULT_UPSTREAM_TIMEOUT_SECONDS),
         ),
         help="Seconds to wait for NVIDIA NIM to start responding before returning 504.",
+    )
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow binding to a non-loopback host. Unsafe with env API key mode.",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug-safe request logging.")
     return parser.parse_args()
@@ -556,8 +703,14 @@ def main() -> None:
     api_key = os.getenv("NVIDIA_API_KEY")
     if args.api_key_mode == API_KEY_MODE_ENV and not api_key:
         raise SystemExit("NVIDIA_API_KEY is required")
-    if args.upstream_timeout_seconds <= 0:
-        raise SystemExit("--upstream-timeout-seconds must be greater than 0")
+    try:
+        validate_bind_security(
+            args.host,
+            allow_remote=args.allow_remote,
+            api_key_mode=args.api_key_mode,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     config = ProxyConfig(
         upstream_base_url=args.upstream_base_url,
@@ -572,6 +725,8 @@ def main() -> None:
     logger.info("Plain-text tool_call handling mode: %s", args.tool_call_text_mode)
     logger.info("API key mode: %s", args.api_key_mode)
     logger.info("Upstream timeout: %s seconds", args.upstream_timeout_seconds)
+    if not is_loopback_host(args.host):
+        logger.warning("Remote client-key proxy binding enabled on %s", args.host)
 
     try:
         server.serve_forever()

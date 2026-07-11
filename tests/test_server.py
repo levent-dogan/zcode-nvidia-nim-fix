@@ -1,3 +1,5 @@
+import argparse
+import io
 import json
 from typing import Any, cast
 
@@ -8,15 +10,21 @@ from nvidia_nim_proxy.server import (
     API_KEY_MODE_CLIENT,
     API_KEY_MODE_ENV,
     DEFAULT_UPSTREAM_TIMEOUT_SECONDS,
+    NIMProxyServer,
     NIMProxyHandler,
     TOOL_CALL_TEXT_DIAGNOSTIC,
     ProxyConfig,
     build_tool_call_text_diagnostic_response,
     build_upstream_chat_request,
     contains_tool_call_text_leak,
+    contains_tool_call_text_leak_in_sse,
     extract_bearer_token,
+    is_loopback_host,
+    positive_int,
     read_stream_prefix_for_tool_call_detection,
     resolve_upstream_api_key,
+    validate_bind_security,
+    valid_port,
 )
 
 
@@ -103,6 +111,36 @@ def test_proxy_config_accepts_custom_upstream_timeout() -> None:
     )
 
     assert config.upstream_timeout_seconds == 600
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+def test_loopback_host_detection_accepts_local_bindings(host: str) -> None:
+    assert is_loopback_host(host) is True
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.20", "proxy.internal", ""])
+def test_loopback_host_detection_rejects_remote_bindings(host: str) -> None:
+    assert is_loopback_host(host) is False
+
+
+def test_remote_bind_requires_explicit_client_key_mode() -> None:
+    with pytest.raises(ValueError, match="without --allow-remote"):
+        validate_bind_security("0.0.0.0", allow_remote=False, api_key_mode=API_KEY_MODE_CLIENT)
+
+    with pytest.raises(ValueError, match="not allowed with env API key mode"):
+        validate_bind_security("0.0.0.0", allow_remote=True, api_key_mode=API_KEY_MODE_ENV)
+
+    validate_bind_security("0.0.0.0", allow_remote=True, api_key_mode=API_KEY_MODE_CLIENT)
+
+
+def test_cli_integer_validation() -> None:
+    assert positive_int("300") == 300
+    assert valid_port("8787") == 8787
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        positive_int("0")
+    with pytest.raises(argparse.ArgumentTypeError):
+        valid_port("70000")
 
 
 def test_extracts_client_bearer_token_without_logging_key() -> None:
@@ -234,6 +272,33 @@ def test_stream_prefix_scan_detects_tool_call_text_leak() -> None:
     assert scan.upstream_exhausted is False
 
 
+def test_stream_prefix_scan_stops_after_bounded_sse_events() -> None:
+    chunks = [
+        f'data: {{"choices":[],"index":{index}}}\n\n'.encode("utf-8")
+        for index in range(9)
+    ]
+
+    def read_chunk(_size: int) -> bytes:
+        return chunks.pop(0) if chunks else b""
+
+    scan = read_stream_prefix_for_tool_call_detection(read_chunk)
+
+    assert scan.buffered.count(b"data:") == 8
+    assert scan.tool_call_text_leak is False
+    assert scan.upstream_exhausted is False
+    assert len(chunks) == 1
+
+
+def test_sse_tool_call_detection_joins_content_fragments() -> None:
+    payload = (
+        b'data: {"choices":[{"delta":{"content":"<tool"}}]}\n\n'
+        b'data: {"choices":[{"delta":{"content":"_call>"}}]}\n\n'
+    )
+
+    assert contains_tool_call_text_leak(payload) is False
+    assert contains_tool_call_text_leak_in_sse(payload) is True
+
+
 def test_stream_prefix_scan_stops_at_limit_for_normal_stream() -> None:
     chunks = [b"a" * 10, b"b" * 10, b"c" * 10]
     read_sizes = []
@@ -258,7 +323,7 @@ def test_stream_prefix_scan_stops_at_limit_for_normal_stream() -> None:
 
 
 def test_stream_prefix_scan_reports_exhausted_for_short_normal_stream() -> None:
-    chunks = [b"data: hello\n\n"]
+    chunks = [b"data: hello"]
 
     def read_chunk(_size: int) -> bytes:
         return chunks.pop(0) if chunks else b""
@@ -267,4 +332,35 @@ def test_stream_prefix_scan_reports_exhausted_for_short_normal_stream() -> None:
 
     assert scan.tool_call_text_leak is False
     assert scan.upstream_exhausted is True
-    assert scan.buffered == b"data: hello\n\n"
+    assert scan.buffered == b"data: hello"
+
+
+def test_stream_relay_uses_incremental_read1() -> None:
+    class IncrementalResponse:
+        def __init__(self) -> None:
+            self.chunks = [b"data: first\n\n", b"data: [DONE]\n\n", b""]
+
+        def read1(self, _size: int) -> bytes:
+            return self.chunks.pop(0)
+
+        def read(self, _size: int) -> bytes:
+            raise AssertionError("stream relay must use read1")
+
+    class RelayHandler:
+        def __init__(self) -> None:
+            self.wfile = io.BytesIO()
+
+    handler = RelayHandler()
+    response = IncrementalResponse()
+
+    NIMProxyHandler._relay_remaining_stream(
+        cast(Any, handler),
+        cast(Any, response),
+    )
+
+    assert handler.wfile.getvalue() == b"data: first\n\ndata: [DONE]\n\n"
+
+
+def test_threaded_server_uses_daemon_request_threads() -> None:
+    assert NIMProxyServer.daemon_threads is True
+    assert NIMProxyServer.allow_reuse_address is True

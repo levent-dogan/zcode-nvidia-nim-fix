@@ -62,10 +62,10 @@ Run once:
 python -m venv .venv
 ```
 
-If PowerShell blocks script activation, run this for the current user:
+If PowerShell blocks script activation, allow it only for the current PowerShell process:
 
 ```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+Set-ExecutionPolicy -Scope Process Bypass
 ```
 
 Activate the virtual environment:
@@ -261,6 +261,7 @@ For NVIDIA NIM requests, the proxy keeps these top-level fields:
 - `top_p`
 - `max_tokens`
 - `stream`
+- `stream_options`
 - `seed`
 - `stop`
 - `frequency_penalty`
@@ -279,6 +280,8 @@ It removes unsupported or provider-specific top-level fields such as:
 - unknown provider-extension fields
 
 `tools`, `tool_choice`, and `parallel_tool_calls` are preserved because they are standard OpenAI-compatible tool-calling fields.
+
+Streaming responses are relayed incrementally. The proxy inspects only the first SSE event for an early plain-text tool-call marker, then forwards subsequent chunks without waiting for a large buffer to fill.
 
 ## GLM 5.2 Compatibility Note
 
@@ -437,6 +440,8 @@ python -m mypy nvidia_nim_proxy tests
 - Do not commit screenshots that show visible keys.
 - `.venv/`, `.env`, `.env.*`, cache folders, and package build output are ignored by `.gitignore`.
 - The proxy binds to `127.0.0.1` by default.
+- Non-loopback bindings are rejected unless `--allow-remote` is explicitly supplied.
+- Remote binding is never allowed in `env` API key mode because that would expose the environment-backed NVIDIA key through a network-accessible proxy.
 - Logs show stripped key names only, not secrets or full message content.
 - In `Client` mode, incoming ZCode bearer tokens are forwarded to NVIDIA NIM but never printed.
 
@@ -449,6 +454,10 @@ rg -n "nvapi-|NVIDIA_API_KEY=|Bearer " .
 
 The search may find documentation placeholders such as `NVIDIA_API_KEY`; it should not find real keys.
 
+## License
+
+Released under the MIT License. See [LICENSE](LICENSE).
+
 ## Roadmap
 
 - Add integration tests with a mock upstream streaming server.
@@ -460,4 +469,6 @@ The search may find documentation placeholders such as `NVIDIA_API_KEY`; it shou
 
 This project follows semantic versioning.
 
-Current version: `0.1.1`.
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+Current version: `0.1.2`.

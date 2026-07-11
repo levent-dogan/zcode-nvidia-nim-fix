@@ -39,6 +39,16 @@ if ($ApiKeyMode -eq "Env" -and [string]::IsNullOrWhiteSpace($env:NVIDIA_API_KEY)
 }
 
 $NormalizedApiKeyMode = $ApiKeyMode.ToLowerInvariant()
+$DisplayHost = if ([string]::IsNullOrWhiteSpace($env:NIM_PROXY_HOST)) {
+    "127.0.0.1"
+} else {
+    $env:NIM_PROXY_HOST
+}
+$DisplayPort = if ([string]::IsNullOrWhiteSpace($env:NIM_PROXY_PORT)) {
+    "8787"
+} else {
+    $env:NIM_PROXY_PORT
+}
 $PythonArgs = @(
     "-m",
     "nvidia_nim_proxy.server",
@@ -53,7 +63,7 @@ if ($DebugMode.IsPresent) {
     $PythonArgs += "--debug"
 }
 
-Write-Host "Starting ZCode NVIDIA NIM proxy on http://127.0.0.1:8787/v1"
+Write-Host "Starting ZCode NVIDIA NIM proxy on http://${DisplayHost}:${DisplayPort}/v1"
 Write-Host "Author: Levent Dogan" -ForegroundColor Cyan
 Write-Host "Plain-text tool_call handling mode: $ToolCallTextMode"
 Write-Host "API key mode: $NormalizedApiKeyMode"

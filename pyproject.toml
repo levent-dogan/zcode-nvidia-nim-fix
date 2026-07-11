@@ -1,14 +1,22 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "zcode-nvidia-nim-fix"
-version = "0.1.1"
+version = "0.1.2"
 description = "Local OpenAI-compatible proxy that sanitizes NVIDIA NIM chat completion requests for ZCode."
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "zcode-nvidia-nim-fix" }]
-license = { text = "MIT" }
+authors = [{ name = "Levent Dogan" }]
+license = "MIT"
+license-files = ["LICENSE"]
 
 [project.scripts]
 zcode-nim-proxy = "nvidia_nim_proxy.server:main"
+
+[tool.setuptools]
+packages = ["nvidia_nim_proxy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

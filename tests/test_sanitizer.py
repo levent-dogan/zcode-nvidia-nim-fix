@@ -18,6 +18,12 @@ def test_detects_nvidia_nim_by_provider_name() -> None:
     assert is_nvidia_nim_provider(context) is True
 
 
+def test_does_not_detect_nim_as_part_of_unrelated_word() -> None:
+    context = ProviderContext(provider_name="Minimum AI", provider_code="minimum")
+
+    assert is_nvidia_nim_provider(context) is False
+
+
 def test_nvidia_nim_strips_extra_body() -> None:
     body = {
         "model": "z-ai/glm-5.2",
@@ -44,6 +50,7 @@ def test_nvidia_nim_keeps_only_safe_openai_compatible_fields() -> None:
         "top_p": 0.9,
         "max_tokens": 128,
         "stream": False,
+        "stream_options": {"include_usage": True},
         "seed": 7,
         "stop": ["END"],
         "frequency_penalty": 0,
@@ -107,6 +114,7 @@ def test_nvidia_nim_streaming_mode_survives_sanitization() -> None:
         "model": "z-ai/glm-5.2",
         "messages": [{"role": "user", "content": "Stream hello."}],
         "stream": True,
+        "stream_options": {"include_usage": True},
         "max_tokens": 128,
         "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }
@@ -117,6 +125,7 @@ def test_nvidia_nim_streaming_mode_survives_sanitization() -> None:
         "model": "z-ai/glm-5.2",
         "messages": [{"role": "user", "content": "Stream hello."}],
         "stream": True,
+        "stream_options": {"include_usage": True},
         "max_tokens": 128,
     }
 
@@ -175,3 +184,27 @@ def test_nvidia_nim_keeps_openai_tool_calling_fields() -> None:
     assert sanitized.body["tools"][0]["function"]["name"] == "edit"
     assert sanitized.body["tool_choice"] == "auto"
     assert sanitized.body["parallel_tool_calls"] is True
+
+
+def test_nvidia_nim_keeps_reasoning_effort_only_for_supported_model_family() -> None:
+    gpt_oss = sanitize_chat_completion_body(
+        {
+            "model": "openai/gpt-oss-120b",
+            "messages": [],
+            "reasoning_effort": "high",
+        },
+        ProviderContext(provider_code="nim"),
+    )
+    glm = sanitize_chat_completion_body(
+        {
+            "model": "z-ai/glm-5.2",
+            "messages": [],
+            "reasoning_effort": "high",
+        },
+        ProviderContext(provider_code="nim"),
+    )
+
+    assert gpt_oss.body["reasoning_effort"] == "high"
+    assert gpt_oss.stripped_keys == ()
+    assert "reasoning_effort" not in glm.body
+    assert glm.stripped_keys == ("reasoning_effort",)
