@@ -19,6 +19,7 @@ from nvidia_nim_proxy.server import (
     contains_tool_call_text_leak,
     contains_tool_call_text_leak_in_sse,
     extract_bearer_token,
+    fingerprint_secret,
     is_loopback_host,
     positive_int,
     read_stream_prefix_for_tool_call_detection,
@@ -170,6 +171,14 @@ def test_client_api_key_mode_uses_zcode_provider_key() -> None:
     assert resolve_upstream_api_key(config, "Bearer client-secret") == "client-secret"
 
 
+def test_secret_fingerprint_is_stable_and_does_not_expose_secret() -> None:
+    fingerprint = fingerprint_secret("client-secret")
+
+    assert fingerprint == fingerprint_secret("client-secret")
+    assert len(fingerprint) == 12
+    assert "client-secret" not in fingerprint
+
+
 def test_client_api_key_mode_requires_incoming_bearer_token() -> None:
     config = ProxyConfig(
         upstream_base_url="https://integrate.api.nvidia.com/v1",
@@ -193,6 +202,8 @@ def test_build_upstream_request_can_forward_client_api_key() -> None:
     )
 
     assert request.headers["Authorization"] == "Bearer client-secret"
+    assert request.api_key_fingerprint == fingerprint_secret("client-secret")
+    assert request.api_key_fingerprint != "client-secret"
 
 
 def test_detects_plain_text_tool_call_leak_without_parsing_content() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import ipaddress
 import json
@@ -78,6 +79,7 @@ class UpstreamRequest:
     headers: dict[str, str]
     stream: bool
     use_tls: bool
+    api_key_fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -172,6 +174,12 @@ def resolve_upstream_api_key(config: ProxyConfig, client_authorization: str | No
     return config.api_key
 
 
+def fingerprint_secret(secret: str) -> str:
+    """Return a stable debug-safe fingerprint for a secret without exposing it."""
+
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:12]
+
+
 def build_upstream_chat_request(
     body: dict[str, Any],
     config: ProxyConfig,
@@ -201,6 +209,7 @@ def build_upstream_chat_request(
         headers=headers,
         stream=stream,
         use_tls=upstream.scheme == "https",
+        api_key_fingerprint=fingerprint_secret(api_key),
     )
 
 
@@ -469,6 +478,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             upstream_request.netloc,
             timeout=self.config.upstream_timeout_seconds,
         )
+        started_at = time.monotonic()
         try:
             connection.request(
                 "POST",
@@ -477,26 +487,67 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                 headers=upstream_request.headers,
             )
             upstream_response = connection.getresponse()
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            self._log_upstream_response(
+                upstream_response,
+                body=body,
+                upstream_request=upstream_request,
+                elapsed_ms=elapsed_ms,
+            )
             self._relay_upstream_response(upstream_response, stream=upstream_request.stream)
         except CLIENT_DISCONNECT_ERRORS:
             raise
         except TimeoutError:
             logger.error(
-                "Timed out while waiting for NVIDIA NIM after %s seconds; model=%r stream=%r",
+                (
+                    "Timed out while waiting for NVIDIA NIM after %s seconds; "
+                    "model=%r stream=%r api_key_fingerprint=%s"
+                ),
                 self.config.upstream_timeout_seconds,
                 body.get("model"),
                 body.get("stream"),
+                upstream_request.api_key_fingerprint,
             )
             self._send_json(504, {"error": "upstream timeout"})
-        except OSError:
+        except OSError as exc:
             logger.error(
-                "Failed to forward request to NVIDIA NIM; model=%r stream=%r",
+                "Failed to forward request to NVIDIA NIM; model=%r stream=%r api_key_fingerprint=%s error=%s",
                 body.get("model"),
                 body.get("stream"),
+                upstream_request.api_key_fingerprint,
+                exc.__class__.__name__,
             )
             self._send_json(502, {"error": "upstream request failed"})
         finally:
             connection.close()
+
+    def _log_upstream_response(
+        self,
+        upstream_response: http.client.HTTPResponse,
+        *,
+        body: dict[str, Any],
+        upstream_request: UpstreamRequest,
+        elapsed_ms: int,
+    ) -> None:
+        retry_after = upstream_response.getheader("Retry-After")
+        message = (
+            "NVIDIA NIM upstream response status=%s reason=%r elapsed_ms=%s "
+            "model=%r stream=%r api_key_fingerprint=%s retry_after=%r"
+        )
+        args = (
+            upstream_response.status,
+            upstream_response.reason,
+            elapsed_ms,
+            body.get("model"),
+            upstream_request.stream,
+            upstream_request.api_key_fingerprint,
+            retry_after,
+        )
+
+        if upstream_response.status == 429 or upstream_response.status >= 500:
+            logger.warning(message, *args)
+        else:
+            logger.debug(message, *args)
 
     def _relay_upstream_response(
         self,

@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. The project follows Semantic Versioning.
 
+## 0.1.3 - 2026-07-13
+
+### Added
+
+- Add debug-safe NVIDIA API key fingerprints to upstream diagnostic logs.
+- Log upstream response status, elapsed time, and `Retry-After` without printing API keys.
+- Document multi-project, multi-key usage and how to diagnose `429` responses.
+
 ## 0.1.2 - 2026-07-11
 
 ### Fixed

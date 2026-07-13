@@ -139,6 +139,10 @@ Example six-provider layout:
 
 In `Client` mode, the proxy forwards ZCode's incoming `Authorization: Bearer ...` token to NVIDIA NIM. The key is never printed.
 
+You can point several ZCode projects or providers at the same local proxy URL while using different NVIDIA API keys in each provider. The proxy handles concurrent local requests with separate request threads. If several projects target the same NVIDIA model at the same time, NVIDIA can still return `429` or slow responses because model capacity, per-key limits, or account-level limits may still apply upstream.
+
+For most multi-project setups, run one proxy in `Client` mode and reuse `http://127.0.0.1:8787/v1` in each project. Do not start several proxy processes on the same port. If you intentionally need separate proxy processes, assign a different `NIM_PROXY_PORT` to each process and use the matching Base URL in ZCode.
+
 ## Step 4: Configure ZCode
 
 For each custom provider:
@@ -339,6 +343,14 @@ If the proxy log shows:
 
 that means the local proxy is running and NVIDIA NIM returned `429 Too Many Requests`. A successful model response would normally be `200`, but changing `429` to `200` in the proxy would hide the real upstream rate-limit or quota problem.
 
+In debug mode, the proxy also logs a safe key fingerprint:
+
+```text
+NVIDIA NIM upstream response status=429 ... api_key_fingerprint='abc123def456' retry_after='30'
+```
+
+The fingerprint is a short SHA-256 prefix. It lets you see whether the same provider key or several different keys are hitting limits without printing the real NVIDIA API key.
+
 Common causes:
 
 - The proxy is running in `env` mode and all ZCode providers are sharing one NVIDIA API key.
@@ -491,4 +503,4 @@ This project follows semantic versioning.
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
-Current version: `0.1.2`.
+Current version: `0.1.3`.
