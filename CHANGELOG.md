@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The project follows Semantic Versioning.
 
+## 0.1.4 - 2026-07-13
+
+### Changed
+
+- Replace example ZCode provider labels with anonymous `NVIDIA Key 1` through `NVIDIA Key 6` names.
+
 ## 0.1.3 - 2026-07-13
 
 ### Added

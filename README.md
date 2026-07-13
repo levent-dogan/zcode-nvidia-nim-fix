@@ -130,12 +130,12 @@ Example six-provider layout:
 
 | Provider | Base URL | API key field |
 | --- | --- | --- |
-| Nvidia CODE | `http://127.0.0.1:8787/v1` | NVIDIA key #1 |
-| Nvidia BOT | `http://127.0.0.1:8787/v1` | NVIDIA key #2 |
-| Nvidia EDU | `http://127.0.0.1:8787/v1` | NVIDIA key #3 |
-| Nvidia K12 | `http://127.0.0.1:8787/v1` | NVIDIA key #4 |
-| Nvidia Extra 1 | `http://127.0.0.1:8787/v1` | NVIDIA key #5 |
-| Nvidia Extra 2 | `http://127.0.0.1:8787/v1` | NVIDIA key #6 |
+| NVIDIA Key 1 | `http://127.0.0.1:8787/v1` | NVIDIA key #1 |
+| NVIDIA Key 2 | `http://127.0.0.1:8787/v1` | NVIDIA key #2 |
+| NVIDIA Key 3 | `http://127.0.0.1:8787/v1` | NVIDIA key #3 |
+| NVIDIA Key 4 | `http://127.0.0.1:8787/v1` | NVIDIA key #4 |
+| NVIDIA Key 5 | `http://127.0.0.1:8787/v1` | NVIDIA key #5 |
+| NVIDIA Key 6 | `http://127.0.0.1:8787/v1` | NVIDIA key #6 |
 
 In `Client` mode, the proxy forwards ZCode's incoming `Authorization: Bearer ...` token to NVIDIA NIM. The key is never printed.
 
@@ -503,4 +503,4 @@ This project follows semantic versioning.
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
-Current version: `0.1.3`.
+Current version: `0.1.4`.
