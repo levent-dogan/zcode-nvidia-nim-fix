@@ -56,20 +56,18 @@ def _pool(
     )
 
 
-def test_round_robin_selection_cycles_through_keys() -> None:
-    pool = _pool()
+def test_round_robin_selection_cycles_from_sixth_key_back_to_first() -> None:
+    keys = tuple(f"key-{index}" for index in range(1, 7))
+    pool = _pool(keys)
     fingerprints: list[str] = []
 
-    for _ in range(4):
+    for _ in range(7):
         lease = pool.acquire(frozenset())
         fingerprints.append(lease.fingerprint)
         lease.release(status=200, retry_after=None)
 
-    assert fingerprints == [
-        fingerprint_secret("key-one"),
-        fingerprint_secret("key-two"),
-        fingerprint_secret("key-three"),
-        fingerprint_secret("key-one"),
+    assert fingerprints == [fingerprint_secret(key) for key in keys] + [
+        fingerprint_secret("key-1")
     ]
 
 
@@ -148,6 +146,8 @@ def test_5xx_failover_is_bounded_and_request_errors_do_not_rotate() -> None:
     pool = _pool()
 
     assert pool.should_failover(500, five_xx_failovers=0) is True
+    assert pool.should_failover(501, five_xx_failovers=0) is True
+    assert pool.should_failover(599, five_xx_failovers=0) is True
     assert pool.should_failover(502, five_xx_failovers=1) is False
     assert pool.should_failover(400, five_xx_failovers=0) is False
     assert pool.should_failover(404, five_xx_failovers=0) is False
@@ -156,12 +156,13 @@ def test_5xx_failover_is_bounded_and_request_errors_do_not_rotate() -> None:
 
 def test_attempted_fingerprints_are_never_selected_again() -> None:
     pool = _pool(("key-one", "key-two"))
-    attempted = frozenset(
-        {
-            fingerprint_secret("key-one"),
-            fingerprint_secret("key-two"),
-        }
-    )
+    first_fingerprint = fingerprint_secret("key-one")
+    attempted = frozenset({first_fingerprint})
+
+    assert pool.has_untried_candidate(attempted) is True
+
+    attempted = frozenset({first_fingerprint, fingerprint_secret("key-two")})
+    assert pool.has_untried_candidate(attempted) is False
 
     with pytest.raises(PoolUnavailableError, match="no untried NVIDIA key"):
         pool.acquire(attempted)

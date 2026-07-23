@@ -250,9 +250,15 @@ class NvidiaKeyPool:
 
         if status in {401, 403, 408, 429}:
             return True
-        if status in {500, 502, 503, 504}:
+        if 500 <= status <= 599:
             return five_xx_failovers < self.max_5xx_failovers
         return False
+
+    def has_untried_candidate(self, attempted: frozenset[str]) -> bool:
+        """Return whether an untried, non-quarantined key could be selected."""
+
+        with self._condition:
+            return not self._has_no_future_candidate(attempted)
 
     def snapshot(self) -> KeyPoolSnapshot:
         """Return key health counts without secrets or fingerprints."""

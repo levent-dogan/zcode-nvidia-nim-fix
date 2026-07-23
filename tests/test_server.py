@@ -1,6 +1,8 @@
 import argparse
 import io
 import json
+import time
+from threading import Event, Thread
 from typing import Any, cast
 
 import pytest
@@ -9,11 +11,15 @@ from nvidia_nim_proxy.sanitizer import ProviderContext, sanitize_chat_completion
 from nvidia_nim_proxy.server import (
     API_KEY_MODE_CLIENT,
     API_KEY_MODE_ENV,
+    API_KEY_MODE_POOL,
     DEFAULT_UPSTREAM_TIMEOUT_SECONDS,
     NIMProxyServer,
     NIMProxyHandler,
     TOOL_CALL_TEXT_DIAGNOSTIC,
     ProxyConfig,
+    UpstreamAttempt,
+    UpstreamRequest,
+    build_health_payload,
     build_tool_call_text_diagnostic_response,
     build_upstream_chat_request,
     contains_tool_call_text_leak,
@@ -21,6 +27,7 @@ from nvidia_nim_proxy.server import (
     extract_bearer_token,
     fingerprint_secret,
     is_loopback_host,
+    non_negative_int,
     positive_int,
     read_stream_prefix_for_tool_call_detection,
     resolve_upstream_api_key,
@@ -132,14 +139,18 @@ def test_remote_bind_requires_explicit_client_key_mode() -> None:
         validate_bind_security("0.0.0.0", allow_remote=True, api_key_mode=API_KEY_MODE_ENV)
 
     validate_bind_security("0.0.0.0", allow_remote=True, api_key_mode=API_KEY_MODE_CLIENT)
+    validate_bind_security("0.0.0.0", allow_remote=True, api_key_mode=API_KEY_MODE_POOL)
 
 
 def test_cli_integer_validation() -> None:
     assert positive_int("300") == 300
+    assert non_negative_int("0") == 0
     assert valid_port("8787") == 8787
 
     with pytest.raises(argparse.ArgumentTypeError):
         positive_int("0")
+    with pytest.raises(argparse.ArgumentTypeError):
+        non_negative_int("-1")
     with pytest.raises(argparse.ArgumentTypeError):
         valid_port("70000")
 
@@ -204,6 +215,250 @@ def test_build_upstream_request_can_forward_client_api_key() -> None:
     assert request.headers["Authorization"] == "Bearer client-secret"
     assert request.api_key_fingerprint == fingerprint_secret("client-secret")
     assert request.api_key_fingerprint != "client-secret"
+
+
+def test_build_upstream_request_pool_override_never_forwards_local_key() -> None:
+    request = build_upstream_chat_request(
+        {"model": "z-ai/glm-5.2", "messages": []},
+        ProxyConfig(
+            upstream_base_url="https://integrate.api.nvidia.com/v1",
+            api_key=None,
+            api_key_mode=API_KEY_MODE_POOL,
+            local_client_key="local-proxy-secret",
+            pool_keys=("nvidia-key-one",),
+        ),
+        api_key_override="nvidia-key-one",
+    )
+
+    assert request.headers["Authorization"] == "Bearer nvidia-key-one"
+    assert "local-proxy-secret" not in request.headers["Authorization"]
+
+
+class _FakeConnection:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeResponse:
+    def __init__(
+        self,
+        status: int,
+        *,
+        retry_after: str | None = None,
+    ) -> None:
+        self.status = status
+        self.reason = "test"
+        self._retry_after = retry_after
+        self.read_count = 0
+
+    def getheader(self, name: str) -> str | None:
+        if name.lower() == "retry-after":
+            return self._retry_after
+        return None
+
+    def getheaders(self) -> list[tuple[str, str]]:
+        return []
+
+    def read(self, _size: int = -1) -> bytes:
+        self.read_count += 1
+        return b'{"error":"test"}'
+
+    def read1(self, _size: int = -1) -> bytes:
+        return b""
+
+
+def _pool_config(
+    *,
+    keys: tuple[str, ...] = ("nvidia-key-one", "nvidia-key-two"),
+) -> ProxyConfig:
+    return ProxyConfig(
+        upstream_base_url="https://integrate.api.nvidia.com/v1",
+        api_key=None,
+        api_key_mode=API_KEY_MODE_POOL,
+        local_client_key="local-proxy-secret",
+        pool_keys=keys,
+        queue_wait_seconds=1,
+    )
+
+
+def _run_fake_pool_forward(
+    statuses: list[int],
+    *,
+    authorization: str = "Bearer local-proxy-secret",
+    stream: bool = False,
+) -> tuple[list[UpstreamRequest], list[int], list[tuple[int, str]]]:
+    handler = cast(Any, object.__new__(NIMProxyHandler))
+    handler.config = _pool_config()
+    requests: list[UpstreamRequest] = []
+    relayed: list[int] = []
+    errors: list[tuple[int, str]] = []
+
+    def open_attempt(request: UpstreamRequest) -> UpstreamAttempt:
+        requests.append(request)
+        response = _FakeResponse(
+            statuses[len(requests) - 1],
+            retry_after="1",
+        )
+        return UpstreamAttempt(
+            connection=cast(Any, _FakeConnection()),
+            response=cast(Any, response),
+            request=request,
+            elapsed_ms=1,
+        )
+
+    def relay(response: _FakeResponse, *, stream: bool) -> None:
+        relayed.append(response.status)
+
+    def send_proxy_error(
+        status_code: int,
+        *,
+        code: str,
+        message: str,
+        retry_after: str | None = None,
+    ) -> None:
+        errors.append((status_code, code))
+
+    handler._open_upstream_attempt = open_attempt
+    handler._relay_upstream_response = relay
+    handler._log_upstream_response = lambda *args, **kwargs: None
+    handler._send_proxy_error = send_proxy_error
+    handler._forward_to_nim(
+        {
+            "model": "z-ai/glm-5.2",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": stream,
+        },
+        client_authorization=authorization,
+    )
+    return requests, relayed, errors
+
+
+def test_pool_429_switches_key_without_forwarding_local_secret() -> None:
+    requests, relayed, errors = _run_fake_pool_forward([429, 200])
+
+    assert [request.headers["Authorization"] for request in requests] == [
+        "Bearer nvidia-key-one",
+        "Bearer nvidia-key-two",
+    ]
+    assert all(
+        "local-proxy-secret" not in request.headers["Authorization"]
+        for request in requests
+    )
+    assert relayed == [200]
+    assert errors == []
+
+
+def test_pool_5xx_uses_only_one_alternate_key() -> None:
+    requests, relayed, errors = _run_fake_pool_forward([501, 599])
+
+    assert len(requests) == 2
+    assert relayed == [599]
+    assert errors == []
+
+
+def test_pool_request_error_does_not_rotate() -> None:
+    requests, relayed, errors = _run_fake_pool_forward([400])
+
+    assert len(requests) == 1
+    assert relayed == [400]
+    assert errors == []
+
+
+def test_pool_rejects_incorrect_local_key_before_upstream_attempt() -> None:
+    requests, relayed, errors = _run_fake_pool_forward(
+        [200],
+        authorization="Bearer incorrect-local-key",
+    )
+
+    assert requests == []
+    assert relayed == []
+    assert errors == [(401, "invalid_local_proxy_key")]
+
+
+def test_pool_does_not_retry_after_successful_stream_starts() -> None:
+    requests, relayed, errors = _run_fake_pool_forward([200], stream=True)
+
+    assert len(requests) == 1
+    assert relayed == [200]
+    assert errors == []
+
+
+def test_health_payload_contains_counts_without_keys_or_fingerprints() -> None:
+    config = _pool_config()
+    payload = build_health_payload(config)
+    serialized = json.dumps(payload)
+
+    assert payload["mode"] == API_KEY_MODE_POOL
+    assert payload["key_pool"]["total"] == 2
+    assert payload["key_pool"]["available"] == 2
+    assert payload["queue"] == {"active": 0, "queued": 0}
+    assert "nvidia-key-one" not in serialized
+    assert fingerprint_secret("nvidia-key-one") not in serialized
+    assert "local-proxy-secret" not in serialized
+
+
+def test_client_mode_serializes_same_key_across_handler_threads() -> None:
+    config = ProxyConfig(
+        upstream_base_url="https://integrate.api.nvidia.com/v1",
+        api_key=None,
+        api_key_mode=API_KEY_MODE_CLIENT,
+        queue_wait_seconds=2,
+    )
+    first_started = Event()
+    release_first = Event()
+    order: list[str] = []
+
+    def make_handler(name: str) -> Any:
+        handler = cast(Any, object.__new__(NIMProxyHandler))
+        handler.config = config
+        handler._send_proxy_error = lambda *args, **kwargs: None
+
+        def perform(_body: dict[str, Any], _request: UpstreamRequest) -> None:
+            order.append(name)
+            if name == "first":
+                first_started.set()
+                release_first.wait(timeout=2)
+
+        handler._perform_direct_attempt = perform
+        return handler
+
+    first_handler = make_handler("first")
+    second_handler = make_handler("second")
+    body = {"model": "z-ai/glm-5.2", "messages": []}
+
+    first_thread = Thread(
+        target=lambda: first_handler._forward_to_nim(
+            body,
+            client_authorization="Bearer shared-nvidia-key",
+        )
+    )
+    second_thread = Thread(
+        target=lambda: second_handler._forward_to_nim(
+            body,
+            client_authorization="Bearer shared-nvidia-key",
+        )
+    )
+    first_thread.start()
+    assert first_started.wait(timeout=2)
+    second_thread.start()
+
+    deadline = time.monotonic() + 2
+    while config.request_scheduler.snapshot().queued != 1:
+        if time.monotonic() >= deadline:
+            raise AssertionError("second client request did not enter the queue")
+        time.sleep(0.005)
+
+    assert order == ["first"]
+    release_first.set()
+    first_thread.join(timeout=2)
+    second_thread.join(timeout=2)
+
+    assert order == ["first", "second"]
+    assert config.request_scheduler.snapshot().active == 0
+    assert config.request_scheduler.snapshot().queued == 0
 
 
 def test_detects_plain_text_tool_call_leak_without_parsing_content() -> None:
