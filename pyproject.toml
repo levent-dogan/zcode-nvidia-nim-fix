@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zcode-nvidia-nim-fix"
-version = "0.1.4"
+version = "0.2.0"
 description = "Local OpenAI-compatible proxy that sanitizes NVIDIA NIM chat completion requests for ZCode."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here. The project follows Semantic Versioning.
 
+## 0.2.0 - 2026-07-23
+
+### Added
+
+- Add bounded FIFO request queues for shared NVIDIA keys.
+- Add private pool mode authenticated by one local ZCode credential.
+- Add continuous numeric round-robin selection (`1` through `n`, then back to `1`).
+- Add key-specific cooldown for `408`/`429` and quarantine for `401`/`403`.
+- Add bounded `5xx` and transport failover without replaying started streams.
+- Add secret-free aggregate queue and key-pool counters to `/health`.
+- Add allowlisted `.env` loading and pool controls to the Windows launcher.
+- Add Windows PowerShell syntax validation to CI.
+
+### Security
+
+- Reject duplicate NVIDIA keys and local credentials reused as upstream keys.
+- Keep local pool credentials, raw NVIDIA keys, fingerprints, and message content out of health output.
+
 ## 0.1.4 - 2026-07-13
 
 ### Changed

@@ -31,7 +31,8 @@ This repository is intended for users searching for:
 - Forwards requests to `https://integrate.api.nvidia.com/v1/chat/completions`.
 - Removes NVIDIA-unsupported top-level fields such as `extra_body`.
 - Preserves standard OpenAI-compatible fields such as `model`, `messages`, `stream`, `tools`, and `tool_choice`.
-- Supports one API key through `NVIDIA_API_KEY` or multiple keys through ZCode provider API key fields.
+- Supports one environment key, per-provider client keys, or a private round-robin key pool.
+- Queues requests per NVIDIA key and applies bounded, status-aware failover in pool mode.
 - Does not print API keys or full message content.
 
 ## Screenshot
@@ -96,25 +97,26 @@ No third-party runtime package is required for the proxy itself. It uses Python 
 
 ## Step 3: Choose API Key Mode
 
-### Option A: One NVIDIA API Key
+### Option A: Env Mode (One NVIDIA API Key)
 
 Use this when all ZCode providers should share one NVIDIA API key.
 
 ```powershell
 $env:NVIDIA_API_KEY="YOUR_NVIDIA_API_KEY"
-.\run_proxy.ps1 -DebugMode
+.\run_proxy.ps1 -ApiKeyMode Env
 ```
 
 In ZCode, the provider API key can be any placeholder because the proxy uses `NVIDIA_API_KEY`.
+Requests are queued for this one key and processed one at a time by default.
 
-### Option B: Multiple NVIDIA API Keys
+### Option B: Client Mode (One Real Key Per ZCode Provider)
 
 Use this when several ZCode providers should each use their own NVIDIA API key.
 
 Start the proxy:
 
 ```powershell
-.\run_proxy.ps1 -ApiKeyMode Client -DebugMode
+.\run_proxy.ps1 -ApiKeyMode Client -UpstreamTimeoutSeconds 600
 ```
 
 Then configure every ZCode provider with the same local base URL and its own NVIDIA key:
@@ -137,11 +139,46 @@ Example six-provider layout:
 | NVIDIA Key 5 | `http://127.0.0.1:8787/v1` | NVIDIA key #5 |
 | NVIDIA Key 6 | `http://127.0.0.1:8787/v1` | NVIDIA key #6 |
 
-In `Client` mode, the proxy forwards ZCode's incoming `Authorization: Bearer ...` token to NVIDIA NIM. The key is never printed.
+In `Client` mode, the proxy forwards ZCode's incoming `Authorization: Bearer ...` token to NVIDIA NIM. Requests using the same key enter the same FIFO queue; requests using different keys can run in parallel. The key is never printed, and this mode cannot switch keys automatically because the proxy knows only the key supplied with that request.
 
 You can point several ZCode projects or providers at the same local proxy URL while using different NVIDIA API keys in each provider. The proxy handles concurrent local requests with separate request threads. If several projects target the same NVIDIA model at the same time, NVIDIA can still return `429` or slow responses because model capacity, per-key limits, or account-level limits may still apply upstream.
 
 For most multi-project setups, run one proxy in `Client` mode and reuse `http://127.0.0.1:8787/v1` in each project. Do not start several proxy processes on the same port. If you intentionally need separate proxy processes, assign a different `NIM_PROXY_PORT` to each process and use the matching Base URL in ZCode.
+
+### Option C: Pool Mode (Recommended For One Local ZCode Key)
+
+Use this when ZCode should contain one local proxy credential while the proxy privately manages all NVIDIA keys.
+
+1. Create the local file:
+
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+
+2. Generate a local-only proxy secret:
+
+   ```powershell
+   ([guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N"))
+   ```
+
+3. Open `.env` locally. Replace `NIM_PROXY_CLIENT_KEY` with the generated value and replace `NVIDIA_API_KEY_1` through `NVIDIA_API_KEY_6` with the six real NVIDIA keys.
+4. Start the pool:
+
+   ```powershell
+   .\run_proxy.ps1 -ApiKeyMode Pool -UpstreamTimeoutSeconds 600
+   ```
+
+5. In ZCode, use the `NIM_PROXY_CLIENT_KEY` value as the provider API key. Never put one of the real NVIDIA keys in that ZCode provider.
+
+The proxy selects healthy keys continuously in numeric order:
+
+```text
+NVIDIA_API_KEY_1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 1 -> 2 -> ...
+```
+
+The cycle does not stop after key 6. Busy, cooling-down, or quarantined keys are skipped. A cooled-down key automatically rejoins the cycle; a key rejected with `401` or `403` remains quarantined until the proxy restarts.
+
+The `.env` parser accepts only `NIM_PROXY_CLIENT_KEY` and numbered `NVIDIA_API_KEY_n` entries. It does not execute the file, does not print values, rejects duplicate NVIDIA keys, and rejects a local proxy key that is also used as an NVIDIA key. `.env` is ignored by Git.
 
 ## Step 4: Configure ZCode
 
@@ -164,6 +201,7 @@ For each custom provider:
 5. Set API key:
    - In `Env` mode: any placeholder.
    - In `Client` mode: the real NVIDIA API key for that provider.
+   - In `Pool` mode: the local `NIM_PROXY_CLIENT_KEY` value from `.env`.
 6. Add model IDs you want to use, for example:
 
    ```text
@@ -226,6 +264,8 @@ Expected proxy log:
 Stripped unsupported NVIDIA NIM request keys: extra_body
 ```
 
+In `Pool` mode, replace the test request's placeholder bearer value with the local `NIM_PROXY_CLIENT_KEY`, never a real NVIDIA key.
+
 ## Launcher Commands
 
 Default one-key mode:
@@ -248,16 +288,22 @@ Multiple-key mode:
 .\run_proxy.ps1 -ApiKeyMode Client -DebugMode
 ```
 
-Recommended multiple-key mode for normal daily use:
+Recommended client-key mode for normal daily use:
 
 ```powershell
 .\run_proxy.ps1 -ApiKeyMode Client -UpstreamTimeoutSeconds 600
 ```
 
-Recommended multiple-key mode while troubleshooting:
+Recommended pool mode for six private NVIDIA keys:
 
 ```powershell
-.\run_proxy.ps1 -ApiKeyMode Client -DebugMode -UpstreamTimeoutSeconds 600
+.\run_proxy.ps1 -ApiKeyMode Pool -UpstreamTimeoutSeconds 600
+```
+
+Pool mode while troubleshooting:
+
+```powershell
+.\run_proxy.ps1 -ApiKeyMode Pool -DebugMode -UpstreamTimeoutSeconds 600
 ```
 
 Use `-DebugMode` when you are checking stripped keys, HTTP status codes, timeout behavior, or ZCode provider problems. For normal daily use, leave `-DebugMode` off to keep the console quieter. API keys and full message content are not printed by the proxy in either mode.
@@ -273,7 +319,24 @@ Batch wrapper:
 ```bat
 start_proxy.bat
 start_proxy.bat -ApiKeyMode Client -DebugMode
+start_proxy.bat -ApiKeyMode Pool -UpstreamTimeoutSeconds 600
 ```
+
+Advanced queue and failover tuning:
+
+```powershell
+.\run_proxy.ps1 `
+  -ApiKeyMode Pool `
+  -UpstreamTimeoutSeconds 600 `
+  -MaxConcurrentPerKey 1 `
+  -MaxQueuePerKey 4 `
+  -MaxTotalQueued 32 `
+  -QueueWaitSeconds 180 `
+  -RateLimitCooldownSeconds 60 `
+  -Max5xxFailovers 1
+```
+
+These are the defaults except for the example's `600`-second upstream timeout. Increasing concurrency can increase NVIDIA rate-limit errors; keep `-MaxConcurrentPerKey 1` unless NVIDIA documents a higher safe limit for your account.
 
 ## Request Sanitizer
 
@@ -306,6 +369,31 @@ It removes unsupported or provider-specific top-level fields such as:
 `tools`, `tool_choice`, and `parallel_tool_calls` are preserved because they are standard OpenAI-compatible tool-calling fields.
 
 Streaming responses are relayed incrementally. The proxy inspects only the first SSE event for an early plain-text tool-call marker, then forwards subsequent chunks without waiting for a large buffer to fill.
+
+## Queue And Failover Behavior
+
+| Condition | Behavior |
+| --- | --- |
+| Same key already active in `Env` or `Client` mode | Wait in that key's FIFO queue |
+| Different healthy keys | May run in parallel |
+| All pool keys busy | Wait in the process-wide FIFO pool queue |
+| Local queue full | Return `429 proxy_queue_full` with `Retry-After: 5` |
+| Queue wait exceeds the configured limit | Return `504 proxy_queue_timeout` |
+| NVIDIA `408` or `429` in pool mode | Cool down that key using `Retry-After` or 60 seconds, then try another untried key |
+| NVIDIA `401` or `403` in pool mode | Quarantine that key until restart, then try another untried key |
+| NVIDIA `5xx` or transport failure in pool mode | Try at most one alternate key by default |
+| NVIDIA `400`, `404`, or `422` | Return the response without switching keys |
+| Streaming response has started | Never retry; relay or close that same response |
+
+Each request tries any given key at most once. If bounded failover is exhausted, the final NVIDIA response is returned unchanged so ZCode sees the real upstream status.
+
+Health endpoint:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8787/health | ConvertTo-Json -Depth 5
+```
+
+Pool mode reports only aggregate counts such as total, available, cooling-down, quarantined, active, and queued keys. It never returns key values or fingerprints.
 
 ## GLM 5.2 Compatibility Note
 
@@ -364,19 +452,25 @@ Check the proxy startup log:
 API key mode: env
 ```
 
-If you have multiple NVIDIA API keys, stop the proxy with `Ctrl+C` and restart it in client key mode:
+If you have multiple NVIDIA API keys, stop the proxy with `Ctrl+C` and either restart in client mode:
 
 ```powershell
 .\run_proxy.ps1 -ApiKeyMode Client -DebugMode
 ```
 
-Then keep the same Base URL for all ZCode providers:
+or configure `.env` and restart in pool mode:
+
+```powershell
+.\run_proxy.ps1 -ApiKeyMode Pool -DebugMode -UpstreamTimeoutSeconds 600
+```
+
+Keep the same Base URL for all ZCode providers:
 
 ```text
 http://127.0.0.1:8787/v1
 ```
 
-Put a different NVIDIA API key in each provider's `API key` field. This spreads requests across your keys instead of sending every provider through one `NVIDIA_API_KEY` environment value.
+In client mode, put a different NVIDIA API key in each provider's `API key` field. In pool mode, put the same local `NIM_PROXY_CLIENT_KEY` in every provider and let the proxy rotate the private key pool.
 
 ## Troubleshooting HTTP 504
 
@@ -391,7 +485,7 @@ retryable=true
 or the proxy log shows:
 
 ```text
-Timed out while waiting for NVIDIA NIM after 300 seconds
+NVIDIA NIM transport error ... error=TimeoutError
 ```
 
 the local proxy sent the request to NVIDIA NIM, but NVIDIA did not start an HTTP response before the proxy timeout. This is different from the original `extra_body` validation error.
@@ -407,12 +501,14 @@ Recommended actions:
 
 - Retry with a shorter prompt first.
 - Try another NVIDIA NIM model.
-- Keep `-ApiKeyMode Client` enabled if you have multiple keys.
+- Keep `-ApiKeyMode Client` or `-ApiKeyMode Pool` enabled if you have multiple keys.
 - Increase the upstream timeout when you expect long responses:
 
 ```powershell
 .\run_proxy.ps1 -ApiKeyMode Client -DebugMode -UpstreamTimeoutSeconds 600
 ```
+
+For pool mode, use the same timeout with `-ApiKeyMode Pool`. A transport timeout can use one alternate key by default, but no retry occurs after a streaming response starts.
 
 If ZCode has its own shorter client-side timeout, increasing the proxy timeout cannot fully solve that. In that case, use smaller prompts or a faster model.
 
@@ -458,12 +554,20 @@ python -m mypy nvidia_nim_proxy tests
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `NVIDIA_API_KEY` | Required in `env` mode | NVIDIA NIM API key used for upstream requests |
+| `NIM_PROXY_CLIENT_KEY` | Required in `pool` mode | Local bearer credential accepted from ZCode; never forwarded upstream |
+| `NVIDIA_API_KEY_1...n` | At least one in `pool` mode | Private NVIDIA keys loaded in numeric round-robin order |
 | `NIM_PROXY_HOST` | `127.0.0.1` | Local bind host |
 | `NIM_PROXY_PORT` | `8787` | Local bind port |
 | `NIM_PROXY_UPSTREAM_BASE_URL` | `https://integrate.api.nvidia.com/v1` | OpenAI-compatible NVIDIA NIM base URL |
 | `NIM_PROXY_TOOL_CALL_TEXT_MODE` | `diagnostic` | Use `diagnostic` for readable tool-call leak messages or `pass` for raw upstream output |
-| `NIM_PROXY_API_KEY_MODE` | `env` | Use `env` for `NVIDIA_API_KEY` or `client` to forward each ZCode provider key |
+| `NIM_PROXY_API_KEY_MODE` | `env` | `env`, `client`, or `pool` |
 | `NIM_PROXY_UPSTREAM_TIMEOUT_SECONDS` | `300` | Seconds to wait for NVIDIA NIM to start responding before returning `504` |
+| `NIM_PROXY_MAX_CONCURRENT_PER_KEY` | `1` | Maximum active upstream requests per NVIDIA key |
+| `NIM_PROXY_MAX_QUEUE_PER_KEY` | `4` | Per-key waiting limit in env/client mode |
+| `NIM_PROXY_MAX_TOTAL_QUEUED` | `32` | Process-wide waiting limit |
+| `NIM_PROXY_QUEUE_WAIT_SECONDS` | `180` | Maximum queue wait before local `504` |
+| `NIM_PROXY_RATE_LIMIT_COOLDOWN_SECONDS` | `60` | Fallback cooldown when NVIDIA omits `Retry-After` |
+| `NIM_PROXY_MAX_5XX_FAILOVERS` | `1` | Alternate keys permitted for a `5xx` or transport failure |
 
 ## Security And Privacy
 
@@ -476,6 +580,8 @@ python -m mypy nvidia_nim_proxy tests
 - Remote binding is never allowed in `env` API key mode because that would expose the environment-backed NVIDIA key through a network-accessible proxy.
 - Logs show stripped key names only, not secrets or full message content.
 - In `Client` mode, incoming ZCode bearer tokens are forwarded to NVIDIA NIM but never printed.
+- In `Pool` mode, ZCode's local bearer token is validated with a constant-time comparison and is never forwarded to NVIDIA.
+- Restrict `.env` so only your Windows account can read it, and rotate the local proxy key if it appears in a screenshot or log.
 
 Before publishing, check:
 
@@ -495,7 +601,7 @@ Released under the MIT License. See [LICENSE](LICENSE).
 - Add integration tests with a mock upstream streaming server.
 - Add optional allowlist extension by environment variable for future NVIDIA-supported fields.
 - Add a Windows service wrapper for persistent local use.
-- Add privacy-preserving request metrics without logging prompt content.
+- Add optional privacy-preserving metrics export without logging prompt content.
 
 ## Versioning
 
@@ -503,4 +609,4 @@ This project follows semantic versioning.
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
-Current version: `0.1.4`.
+Current version: `0.2.0`.
