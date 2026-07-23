@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import http.client
 import ipaddress
 import json
@@ -16,6 +15,13 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from nvidia_nim_proxy import __version__
+from nvidia_nim_proxy.credentials import (
+    API_KEY_MODE_CLIENT,
+    API_KEY_MODE_ENV,
+    CredentialBroker,
+    extract_bearer_token as extract_bearer_token,
+    fingerprint_secret,
+)
 from nvidia_nim_proxy.sanitizer import ProviderContext, sanitize_chat_completion_body
 
 
@@ -39,8 +45,6 @@ HOP_BY_HOP_RESPONSE_HEADERS = {
 }
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
 TOOL_CALL_LEAK_MARKERS = (b"<tool_call", b"</tool_call", b"&lt;tool_call", b"&lt;/tool_call")
-API_KEY_MODE_ENV = "env"
-API_KEY_MODE_CLIENT = "client"
 TOOL_CALL_TEXT_DIAGNOSTIC = (
     "Provider/model compatibility issue: NVIDIA NIM returned tool-call markup as normal "
     "assistant text instead of real OpenAI-compatible tool_calls. The proxy did not execute "
@@ -146,38 +150,14 @@ def validate_bind_security(host: str, *, allow_remote: bool, api_key_mode: str) 
         raise ValueError("remote binding is not allowed with env API key mode; use client mode")
 
 
-def extract_bearer_token(authorization_header: str | None) -> str | None:
-    """Extract a Bearer token without logging or validating token content."""
-
-    if authorization_header is None:
-        return None
-
-    parts = authorization_header.strip().split(None, 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        return None
-
-    token = parts[1].strip()
-    return token or None
-
-
 def resolve_upstream_api_key(config: ProxyConfig, client_authorization: str | None) -> str:
     """Resolve which NVIDIA API key should be used for the upstream request."""
 
-    if config.api_key_mode == API_KEY_MODE_CLIENT:
-        client_token = extract_bearer_token(client_authorization)
-        if client_token is None:
-            raise PermissionError("missing client bearer token")
-        return client_token
-
-    if config.api_key is None or config.api_key.strip() == "":
-        raise ValueError("missing NVIDIA_API_KEY")
-    return config.api_key
-
-
-def fingerprint_secret(secret: str) -> str:
-    """Return a stable debug-safe fingerprint for a secret without exposing it."""
-
-    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:12]
+    return CredentialBroker(
+        mode=config.api_key_mode,
+        env_api_key=config.api_key,
+        local_client_key=None,
+    ).resolve_direct_key(client_authorization)
 
 
 def build_upstream_chat_request(
