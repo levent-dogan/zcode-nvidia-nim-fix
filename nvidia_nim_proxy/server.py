@@ -1225,6 +1225,10 @@ def main() -> None:
             pool_keys = load_pool_keys(os.environ)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
+        if local_client_key in pool_keys:
+            raise SystemExit(
+                "NIM_PROXY_CLIENT_KEY must be different from every NVIDIA API key"
+            )
     try:
         validate_bind_security(
             args.host,

@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 
+import nvidia_nim_proxy.server as server_module
 from nvidia_nim_proxy.sanitizer import ProviderContext, sanitize_chat_completion_body
 from nvidia_nim_proxy.server import (
     API_KEY_MODE_CLIENT,
@@ -27,6 +28,7 @@ from nvidia_nim_proxy.server import (
     extract_bearer_token,
     fingerprint_secret,
     is_loopback_host,
+    main,
     non_negative_int,
     positive_int,
     read_stream_prefix_for_tool_call_detection,
@@ -232,6 +234,24 @@ def test_build_upstream_request_pool_override_never_forwards_local_key() -> None
 
     assert request.headers["Authorization"] == "Bearer nvidia-key-one"
     assert "local-proxy-secret" not in request.headers["Authorization"]
+
+
+def test_main_rejects_local_proxy_key_reused_as_nvidia_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        server_module,
+        "parse_args",
+        lambda: argparse.Namespace(api_key_mode=API_KEY_MODE_POOL, debug=False),
+    )
+    monkeypatch.setenv("NIM_PROXY_CLIENT_KEY", "shared-secret")
+    monkeypatch.setenv("NVIDIA_API_KEY_1", "shared-secret")
+
+    with pytest.raises(
+        SystemExit,
+        match="NIM_PROXY_CLIENT_KEY must be different",
+    ):
+        main()
 
 
 class _FakeConnection:
