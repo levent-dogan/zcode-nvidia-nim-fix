@@ -14,6 +14,13 @@ All notable changes to this project are documented here. The project follows Sem
 - Add secret-free aggregate queue and key-pool counters to `/health`.
 - Add allowlisted `.env` loading and pool controls to the Windows launcher.
 - Add Windows PowerShell syntax validation to CI.
+- Add real HTTP integration coverage for sanitization and six-key rotation.
+
+### Fixed
+
+- Isolate pool mode from stale numbered NVIDIA keys inherited from the parent shell.
+- Classify upstream connection resets and pre-response body timeouts without sending a second HTTP status.
+- Fail closed on upstream URLs containing credentials, query parameters, or fragments.
 
 ### Security
 

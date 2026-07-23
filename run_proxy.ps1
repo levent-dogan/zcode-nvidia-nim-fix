@@ -106,7 +106,7 @@ if (-not (Test-Path -LiteralPath $ActivateScript -PathType Leaf)) {
 
 . $ActivateScript
 
-$ImportedEnvironmentNames = @()
+$ManagedEnvironmentNames = @()
 $OriginalEnvironment = @{}
 if ($ApiKeyMode -eq "Pool") {
     $ResolvedEnvFile = if ([string]::IsNullOrWhiteSpace($EnvFile)) {
@@ -134,15 +134,30 @@ if ($ApiKeyMode -eq "Pool") {
         }
     }
 
-    foreach ($Name in $PoolEnvironment.Keys) {
+    $ExistingNumberedKeyNames = @(
+        Get-ChildItem Env: |
+            Where-Object { $_.Name -match "^NVIDIA_API_KEY_[1-9][0-9]*$" } |
+            ForEach-Object { $_.Name }
+    )
+    $ManagedEnvironmentNames = @(
+        @("NIM_PROXY_CLIENT_KEY") +
+        $ExistingNumberedKeyNames +
+        @($PoolEnvironment.Keys) |
+            Sort-Object -Unique
+    )
+
+    foreach ($Name in $ManagedEnvironmentNames) {
         $ExistingValue = [Environment]::GetEnvironmentVariable($Name, "Process")
         $OriginalEnvironment[$Name] = @{
             Exists = $null -ne $ExistingValue
             Value = $ExistingValue
         }
-        Set-Item -LiteralPath "Env:$Name" -Value $PoolEnvironment[$Name]
+        if ($PoolEnvironment.ContainsKey($Name)) {
+            Set-Item -LiteralPath "Env:$Name" -Value $PoolEnvironment[$Name]
+        } else {
+            Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
+        }
     }
-    $ImportedEnvironmentNames = @($PoolEnvironment.Keys)
 } elseif ($ApiKeyMode -eq "Env" -and [string]::IsNullOrWhiteSpace($env:NVIDIA_API_KEY)) {
     Stop-WithMessage "NVIDIA_API_KEY is not set. Set it for this PowerShell session with: `$env:NVIDIA_API_KEY='YOUR_KEY'"
 }
@@ -201,7 +216,7 @@ try {
     python @PythonArgs
     exit $LASTEXITCODE
 } finally {
-    foreach ($Name in $ImportedEnvironmentNames) {
+    foreach ($Name in $ManagedEnvironmentNames) {
         $Original = $OriginalEnvironment[$Name]
         if ($Original.Exists) {
             Set-Item -LiteralPath "Env:$Name" -Value $Original.Value

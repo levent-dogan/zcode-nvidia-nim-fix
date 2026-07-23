@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 from nvidia_nim_proxy import __version__
 from nvidia_nim_proxy.credentials import (
@@ -93,7 +93,9 @@ class ProxyConfig:
         rate_limit_cooldown_seconds: int = DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,
         max_5xx_failovers: int = DEFAULT_MAX_5XX_FAILOVERS,
     ) -> None:
-        self.upstream_base_url = upstream_base_url.rstrip("/")
+        normalized_upstream_base_url = upstream_base_url.rstrip("/")
+        validate_upstream_base_url(normalized_upstream_base_url)
+        self.upstream_base_url = normalized_upstream_base_url
         self.api_key = api_key
         self.tool_call_text_mode = tool_call_text_mode
         self.api_key_mode = api_key_mode
@@ -225,6 +227,35 @@ def validate_bind_security(host: str, *, allow_remote: bool, api_key_mode: str) 
         )
 
 
+def validate_upstream_base_url(value: str) -> ParseResult:
+    """Return a safe parsed upstream URL or reject secret-bearing URL components."""
+
+    upstream = urlparse(value)
+    try:
+        port = upstream.port
+    except ValueError as exc:
+        raise ValueError("invalid upstream base URL") from exc
+
+    if (
+        upstream.scheme not in {"http", "https"}
+        or upstream.hostname is None
+        or port is not None
+        and not 1 <= port <= 65535
+    ):
+        raise ValueError("invalid upstream base URL")
+    if (
+        upstream.username is not None
+        or upstream.password is not None
+        or upstream.params
+        or upstream.query
+        or upstream.fragment
+    ):
+        raise ValueError(
+            "upstream base URL must not contain credentials, parameters, query, or fragment"
+        )
+    return upstream
+
+
 def resolve_upstream_api_key(config: ProxyConfig, client_authorization: str | None) -> str:
     """Resolve which NVIDIA API key should be used for the upstream request."""
 
@@ -240,9 +271,7 @@ def build_upstream_chat_request(
 ) -> UpstreamRequest:
     """Build the debug-safe upstream request from an already sanitized body."""
 
-    upstream = urlparse(config.upstream_base_url)
-    if upstream.scheme not in {"http", "https"} or not upstream.netloc:
-        raise ValueError("invalid upstream base URL")
+    upstream = validate_upstream_base_url(config.upstream_base_url)
 
     api_key = (
         api_key_override
@@ -452,6 +481,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
     config: ProxyConfig
 
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+        self._client_response_started = False
         if self.path == "/health":
             self._send_json(200, build_health_payload(self.config))
             return
@@ -459,6 +489,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not_found"})
 
     def do_POST(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+        self._client_response_started = False
         if self.path != "/v1/chat/completions":
             self._send_json(404, {"error": "not_found"})
             return
@@ -634,9 +665,13 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
         body: dict[str, Any],
         upstream_request: UpstreamRequest,
     ) -> None:
-        attempt: UpstreamAttempt | None = None
         try:
             attempt = self._open_upstream_attempt(upstream_request)
+        except (TimeoutError, OSError) as exc:
+            self._handle_relay_transport_error(body, upstream_request, exc)
+            return
+
+        try:
             self._log_upstream_response(
                 attempt.response,
                 body=body,
@@ -647,33 +682,10 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                 attempt.response,
                 stream=upstream_request.stream,
             )
-        except CLIENT_DISCONNECT_ERRORS:
-            raise
-        except TimeoutError:
-            self._log_upstream_transport_error(
-                body,
-                upstream_request,
-                error="TimeoutError",
-            )
-            self._send_proxy_error(
-                504,
-                code="upstream_timeout",
-                message="timed out while waiting for NVIDIA NIM",
-            )
-        except OSError as exc:
-            self._log_upstream_transport_error(
-                body,
-                upstream_request,
-                error=exc.__class__.__name__,
-            )
-            self._send_proxy_error(
-                502,
-                code="upstream_request_failed",
-                message="failed to forward request to NVIDIA NIM",
-            )
+        except (TimeoutError, OSError) as exc:
+            self._handle_relay_transport_error(body, upstream_request, exc)
         finally:
-            if attempt is not None:
-                attempt.connection.close()
+            attempt.connection.close()
 
     def _forward_from_pool(
         self,
@@ -836,10 +848,51 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                     )
                     continue
 
-                self._relay_upstream_response(
-                    attempt.response,
-                    stream=upstream_request.stream,
-                )
+                try:
+                    self._relay_upstream_response(
+                        attempt.response,
+                        stream=upstream_request.stream,
+                    )
+                except (TimeoutError, OSError) as exc:
+                    if self._client_response_has_started():
+                        self._handle_relay_transport_error(
+                            body,
+                            upstream_request,
+                            exc,
+                        )
+                        lease.release(
+                            status=attempt.response.status,
+                            retry_after=retry_after,
+                        )
+                        return
+
+                    can_failover = (
+                        200 <= attempt.response.status <= 299
+                        and five_xx_failovers < key_pool.max_5xx_failovers
+                        and key_pool.has_untried_candidate(frozenset(attempted))
+                    )
+                    if can_failover:
+                        five_xx_failovers += 1
+                        logger.warning(
+                            (
+                                "Queue event=failover reason=response_read_error model=%r "
+                                "api_key_fingerprint=%s attempt=%s error=%s"
+                            ),
+                            model,
+                            lease.fingerprint,
+                            len(attempted),
+                            exc.__class__.__name__,
+                        )
+                        lease.release()
+                        continue
+
+                    self._handle_relay_transport_error(
+                        body,
+                        upstream_request,
+                        exc,
+                    )
+                    lease.release()
+                    return
                 lease.release(
                     status=attempt.response.status,
                     retry_after=retry_after,
@@ -906,6 +959,50 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             error,
         )
 
+    def _client_response_has_started(self) -> bool:
+        return bool(getattr(self, "_client_response_started", False))
+
+    def _begin_client_response(self) -> None:
+        self._client_response_started = True
+
+    def _handle_relay_transport_error(
+        self,
+        body: dict[str, Any],
+        upstream_request: UpstreamRequest,
+        exc: OSError,
+    ) -> None:
+        if self._client_response_has_started():
+            logger.error(
+                (
+                    "HTTP relay failed after client response started; model=%r stream=%r "
+                    "api_key_fingerprint=%s error=%s"
+                ),
+                body.get("model"),
+                upstream_request.stream,
+                upstream_request.api_key_fingerprint,
+                exc.__class__.__name__,
+            )
+            self.close_connection = True
+            return
+
+        self._log_upstream_transport_error(
+            body,
+            upstream_request,
+            error=exc.__class__.__name__,
+        )
+        if isinstance(exc, TimeoutError):
+            self._send_proxy_error(
+                504,
+                code="upstream_timeout",
+                message="timed out while waiting for NVIDIA NIM",
+            )
+        else:
+            self._send_proxy_error(
+                502,
+                code="upstream_request_failed",
+                message="failed to relay the NVIDIA NIM response",
+            )
+
     def _log_upstream_response(
         self,
         upstream_response: http.client.HTTPResponse,
@@ -953,6 +1050,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                 ):
                     self._send_tool_call_text_diagnostic(stream=False)
                     return
+            NIMProxyHandler._begin_client_response(self)
             self.send_response(upstream_response.status, upstream_response.reason)
             for header, value in upstream_response.getheaders():
                 if header.lower() not in HOP_BY_HOP_RESPONSE_HEADERS and header.lower() != "content-length":
@@ -972,6 +1070,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                 self._send_tool_call_text_diagnostic(stream=True)
                 return
 
+            NIMProxyHandler._begin_client_response(self)
             self.send_response(upstream_response.status, upstream_response.reason)
             for header, value in upstream_response.getheaders():
                 if header.lower() not in HOP_BY_HOP_RESPONSE_HEADERS and header.lower() != "content-length":
@@ -990,6 +1089,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
+        NIMProxyHandler._begin_client_response(self)
         self.send_response(upstream_response.status, upstream_response.reason)
         for header, value in upstream_response.getheaders():
             if header.lower() not in HOP_BY_HOP_RESPONSE_HEADERS:
@@ -1069,6 +1169,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
     ) -> None:
         response_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         try:
+            NIMProxyHandler._begin_client_response(self)
             self.send_response(status_code)
             self.send_header("Content-Type", "application/json")
             for name, value in (headers or {}).items():
@@ -1082,6 +1183,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
     def _send_tool_call_text_diagnostic(self, *, stream: bool) -> None:
         response_body = build_tool_call_text_diagnostic_response(stream=stream)
         try:
+            NIMProxyHandler._begin_client_response(self)
             self.send_response(200)
             self.send_header("Cache-Control", "no-cache")
             if stream:
@@ -1238,21 +1340,24 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    config = ProxyConfig(
-        upstream_base_url=args.upstream_base_url,
-        api_key=api_key,
-        tool_call_text_mode=args.tool_call_text_mode,
-        api_key_mode=args.api_key_mode,
-        upstream_timeout_seconds=args.upstream_timeout_seconds,
-        local_client_key=local_client_key,
-        pool_keys=pool_keys,
-        max_concurrent_per_key=args.max_concurrent_per_key,
-        max_queue_per_key=args.max_queue_per_key,
-        max_total_queued=args.max_total_queued,
-        queue_wait_seconds=args.queue_wait_seconds,
-        rate_limit_cooldown_seconds=args.rate_limit_cooldown_seconds,
-        max_5xx_failovers=args.max_5xx_failovers,
-    )
+    try:
+        config = ProxyConfig(
+            upstream_base_url=args.upstream_base_url,
+            api_key=api_key,
+            tool_call_text_mode=args.tool_call_text_mode,
+            api_key_mode=args.api_key_mode,
+            upstream_timeout_seconds=args.upstream_timeout_seconds,
+            local_client_key=local_client_key,
+            pool_keys=pool_keys,
+            max_concurrent_per_key=args.max_concurrent_per_key,
+            max_queue_per_key=args.max_queue_per_key,
+            max_total_queued=args.max_total_queued,
+            queue_wait_seconds=args.queue_wait_seconds,
+            rate_limit_cooldown_seconds=args.rate_limit_cooldown_seconds,
+            max_5xx_failovers=args.max_5xx_failovers,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     server = build_server(args.host, args.port, config)
     logger.info("Listening on http://%s:%s/v1", args.host, args.port)
     logger.info("Forwarding sanitized requests to %s", args.upstream_base_url)

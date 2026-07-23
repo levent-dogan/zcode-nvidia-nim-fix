@@ -95,12 +95,25 @@ def test_build_upstream_request_uses_sanitized_streaming_payload() -> None:
     }
 
 
-def test_build_upstream_request_rejects_invalid_base_url() -> None:
-    with pytest.raises(ValueError, match="invalid upstream base URL"):
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "not-a-url",
+        "https://user:secret@integrate.api.nvidia.com/v1",
+        "https://integrate.api.nvidia.com/v1?api_key=secret",
+        "https://integrate.api.nvidia.com/v1#secret",
+    ],
+)
+def test_proxy_config_rejects_invalid_or_secret_bearing_base_url(
+    base_url: str,
+) -> None:
+    with pytest.raises(ValueError, match="upstream base URL") as exc_info:
         build_upstream_chat_request(
             {"model": "z-ai/glm-5.2", "messages": []},
-            ProxyConfig(upstream_base_url="not-a-url", api_key="secret-test-key"),
+            ProxyConfig(upstream_base_url=base_url, api_key="secret-test-key"),
         )
+    assert "secret@" not in str(exc_info.value)
+    assert "api_key=secret" not in str(exc_info.value)
 
 
 def test_proxy_config_defaults_to_extended_upstream_timeout() -> None:
@@ -309,12 +322,14 @@ def _run_fake_pool_forward(
     *,
     authorization: str = "Bearer local-proxy-secret",
     stream: bool = False,
+    relay_failures: int = 0,
 ) -> tuple[list[UpstreamRequest], list[int], list[tuple[int, str]]]:
     handler = cast(Any, object.__new__(NIMProxyHandler))
     handler.config = _pool_config()
     requests: list[UpstreamRequest] = []
     relayed: list[int] = []
     errors: list[tuple[int, str]] = []
+    relay_attempts = 0
 
     def open_attempt(request: UpstreamRequest) -> UpstreamAttempt:
         requests.append(request)
@@ -330,6 +345,10 @@ def _run_fake_pool_forward(
         )
 
     def relay(response: _FakeResponse, *, stream: bool) -> None:
+        nonlocal relay_attempts
+        relay_attempts += 1
+        if relay_attempts <= relay_failures:
+            raise TimeoutError("upstream body read timed out")
         relayed.append(response.status)
 
     def send_proxy_error(
@@ -404,6 +423,76 @@ def test_pool_does_not_retry_after_successful_stream_starts() -> None:
     assert len(requests) == 1
     assert relayed == [200]
     assert errors == []
+
+
+def test_pool_retries_one_alternate_when_success_body_read_times_out() -> None:
+    requests, relayed, errors = _run_fake_pool_forward(
+        [200, 200],
+        relay_failures=1,
+    )
+
+    assert len(requests) == 2
+    assert relayed == [200]
+    assert errors == []
+
+
+def test_direct_mode_maps_upstream_connection_reset_to_502() -> None:
+    handler = cast(Any, object.__new__(NIMProxyHandler))
+    handler.config = ProxyConfig(
+        upstream_base_url="https://integrate.api.nvidia.com/v1",
+        api_key="env-secret",
+    )
+    errors: list[tuple[int, str]] = []
+
+    def fail_open(_request: UpstreamRequest) -> UpstreamAttempt:
+        raise ConnectionResetError("upstream reset")
+
+    def send_proxy_error(
+        status_code: int,
+        *,
+        code: str,
+        message: str,
+        retry_after: str | None = None,
+    ) -> None:
+        errors.append((status_code, code))
+
+    handler._open_upstream_attempt = fail_open
+    handler._send_proxy_error = send_proxy_error
+    request = build_upstream_chat_request(
+        {"model": "z-ai/glm-5.2", "messages": []},
+        handler.config,
+    )
+
+    handler._perform_direct_attempt(
+        {"model": "z-ai/glm-5.2", "messages": []},
+        request,
+    )
+
+    assert errors == [(502, "upstream_request_failed")]
+
+
+def test_transport_error_after_response_start_only_closes_connection() -> None:
+    handler = cast(Any, object.__new__(NIMProxyHandler))
+    handler._client_response_started = True
+    handler.close_connection = False
+    handler._send_proxy_error = lambda *args, **kwargs: pytest.fail(
+        "a second HTTP response must not be sent"
+    )
+    request = build_upstream_chat_request(
+        {"model": "z-ai/glm-5.2", "messages": [], "stream": True},
+        ProxyConfig(
+            upstream_base_url="https://integrate.api.nvidia.com/v1",
+            api_key="env-secret",
+        ),
+    )
+
+    handler._handle_relay_transport_error(
+        {"model": "z-ai/glm-5.2", "messages": [], "stream": True},
+        request,
+        TimeoutError("stream stalled"),
+    )
+
+    assert handler.close_connection is True
 
 
 def test_health_payload_contains_counts_without_keys_or_fingerprints() -> None:

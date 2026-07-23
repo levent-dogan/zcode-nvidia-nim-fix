@@ -14,6 +14,7 @@ This proxy is intended for local developer use with ZCode and NVIDIA NIM OpenAI-
 - Generate a random local proxy key, keep it different from every NVIDIA key, and rotate it if exposed.
 - Restrict `.env` filesystem permissions to the Windows account that runs the proxy.
 - The `.env` loader accepts only the documented credential names and never executes file content.
+- Upstream URLs containing credentials, query parameters, or fragments are rejected before the proxy binds.
 - The proxy never logs API key values, local proxy credentials, or full message content in any mode.
 - `/health` exposes aggregate queue/key-state counts only. It does not expose raw keys or fingerprints.
 
