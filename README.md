@@ -1,6 +1,8 @@
 # zcode-nvidia-nim-fix
 
-Windows-friendly local compatibility proxy for using NVIDIA NIM OpenAI-compatible chat models inside ZCode.
+Windows-friendly local compatibility proxy for using NVIDIA NIM OpenAI-compatible chat models inside ZCode and other clients that support a custom OpenAI Chat Completions base URL.
+
+**Türkçe ayrıntılı kurulum ve kullanım kılavuzu:** [KULLANIM_KILAVUZU_TR.md](KULLANIM_KILAVUZU_TR.md)
 
 This project fixes the ZCode + NVIDIA NIM request failure:
 
@@ -23,11 +25,13 @@ This repository is intended for users searching for:
 - GLM 5.2 NVIDIA NIM `/chat/completions`
 - Windows PowerShell launcher for NVIDIA NIM proxy
 - Multiple NVIDIA API keys with ZCode custom providers
+- NVIDIA NIM local proxy for other OpenAI-compatible IDEs
+- Custom OpenAI Chat Completions base URL for NVIDIA NIM
 
 ## What This Proxy Does
 
 - Listens locally at `http://127.0.0.1:8787/v1`.
-- Accepts OpenAI-compatible `POST /v1/chat/completions` requests from ZCode.
+- Accepts OpenAI-compatible `POST /v1/chat/completions` requests from ZCode or another compatible local client.
 - Forwards requests to `https://integrate.api.nvidia.com/v1/chat/completions`.
 - Removes NVIDIA-unsupported top-level fields such as `extra_body`.
 - Preserves standard OpenAI-compatible fields such as `model`, `messages`, `stream`, `tools`, and `tool_choice`.
@@ -51,7 +55,7 @@ ZCode custom provider configuration using the local proxy URL:
 - PowerShell 5.1 or PowerShell 7+
 - Python 3.10 or newer
 - One or more NVIDIA API keys from NVIDIA NIM
-- ZCode custom provider access
+- ZCode custom provider access or another client that accepts a custom OpenAI Chat Completions base URL
 
 Check Python:
 
@@ -214,6 +218,41 @@ For each custom provider:
    ```
 
 The proxy is not limited to GLM 5.2. It forwards the `model` value sent by ZCode. The selected model must be available through NVIDIA NIM and support `/chat/completions`.
+
+## Use With Other IDEs And Clients
+
+The proxy is not tied to the ZCode user interface. It can be used by another IDE, extension, desktop client, or local tool when that client supports:
+
+- A custom OpenAI-compatible Base URL
+- The Chat Completions API
+- Manual model IDs
+- Bearer API-key authentication
+
+Generic client configuration:
+
+| Client field | Value |
+| --- | --- |
+| Provider/API type | OpenAI or OpenAI-compatible |
+| Base URL | `http://127.0.0.1:8787/v1` |
+| API endpoint | `/chat/completions` |
+| Model | An NVIDIA NIM chat model ID |
+| API key in `Env` mode | Any non-empty placeholder |
+| API key in `Client` mode | The real NVIDIA key for that client/provider |
+| API key in `Pool` mode | The local `NIM_PROXY_CLIENT_KEY` value |
+
+Some clients automatically append `/v1` to the configured URL. If that behavior would produce `/v1/v1/chat/completions`, configure `http://127.0.0.1:8787` instead. The final request path reaching the proxy must be exactly `/v1/chat/completions`.
+
+Several IDEs or projects on the same Windows computer can share one running proxy. They are subject to the same queue, key-pool, and NVIDIA upstream limits described below.
+
+Current compatibility boundary:
+
+- Supported: `POST /v1/chat/completions`, normal JSON responses, and SSE streaming responses.
+- Not implemented: `/v1/responses`, `/v1/models`, `/v1/embeddings`, image, audio, and file APIs.
+- Clients that require automatic model discovery through `/v1/models` may need manual model entry.
+- Structured tool calling still depends on the selected NVIDIA NIM model producing valid OpenAI-compatible `tool_calls`.
+- The default `127.0.0.1` binding is accessible only from applications running on the same computer.
+
+See the [detailed Turkish usage guide](KULLANIM_KILAVUZU_TR.md) for mode selection, generic IDE setup, multi-project operation, testing, troubleshooting, and security guidance.
 
 ## Step 5: Test The Proxy
 
