@@ -2,8 +2,6 @@
 
 Windows-friendly local compatibility proxy for using NVIDIA NIM OpenAI-compatible chat models inside ZCode and other clients that support a custom OpenAI Chat Completions base URL.
 
-**Türkçe ayrıntılı kurulum ve kullanım kılavuzu:** [KULLANIM_KILAVUZU_TR.md](KULLANIM_KILAVUZU_TR.md)
-
 This project fixes the ZCode + NVIDIA NIM request failure:
 
 ```text
@@ -251,8 +249,6 @@ Current compatibility boundary:
 - Clients that require automatic model discovery through `/v1/models` may need manual model entry.
 - Structured tool calling still depends on the selected NVIDIA NIM model producing valid OpenAI-compatible `tool_calls`.
 - The default `127.0.0.1` binding is accessible only from applications running on the same computer.
-
-See the [detailed Turkish usage guide](KULLANIM_KILAVUZU_TR.md) for mode selection, generic IDE setup, multi-project operation, testing, troubleshooting, and security guidance.
 
 ## Step 5: Test The Proxy
 
