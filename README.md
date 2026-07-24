@@ -308,6 +308,17 @@ Pool mode while troubleshooting:
 
 Use `-DebugMode` when you are checking stripped keys, HTTP status codes, timeout behavior, or ZCode provider problems. For normal daily use, leave `-DebugMode` off to keep the console quieter. API keys and full message content are not printed by the proxy in either mode.
 
+Dedicated Windows debug launchers:
+
+```bat
+start_proxy_pool_debug.bat
+start_proxy_client_debug.bat
+```
+
+- `start_proxy_pool_debug.bat` loads the private NVIDIA keys from `.env`. Configure ZCode with the local `NIM_PROXY_CLIENT_KEY`; the real NVIDIA keys remain local.
+- `start_proxy_client_debug.bat` forwards the NVIDIA key supplied by each ZCode provider. This mode does not use automatic pool rotation or failover.
+- Both launchers use port `8787` and a 600-second upstream timeout. Stop the active proxy with `Ctrl+C` before switching modes.
+
 Pass raw upstream tool-call-looking text instead of readable diagnostics:
 
 ```powershell
@@ -609,4 +620,4 @@ This project follows semantic versioning.
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
-Current version: `0.2.0`.
+Current version: `0.2.1`.

@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. The project follows Semantic Versioning.
 
+## 0.2.1 - 2026-07-24
+
+### Added
+
+- Add separate Windows debug launchers for pool and client API-key modes.
+- Document the authentication behavior and switching procedure for both launchers.
+
 ## 0.2.0 - 2026-07-23
 
 ### Added
