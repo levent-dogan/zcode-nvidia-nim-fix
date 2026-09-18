@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented here. The project follows Semantic Versioning.
 
+## Unreleased
+
+### Added
+
+- Discover the public NVIDIA model catalog at startup in the background and refresh every six hours, with bounded retries and a last-good disk cache.
+- Serve cached `GET /v1/models` with mode-appropriate bearer checks and expose secret-free catalog health metadata.
+- Add opt-in, add-only OpenCode GUI configuration sync for verified reasoning chat models, preserving manual entries and taking private backups before replacing existing configuration.
+- Add Windows launcher flags for catalog refresh intervals, disabling discovery, and selecting an OpenCode JSON file.
+- Default Kimi K3 and documented DeepSeek V4 model IDs to maximum reasoning using NVIDIA-specific wire formats.
+- Record GLM 5.3 and GLM 5.3 Flash's documented native max default without sending unverified hosted API overrides.
+- Add an OpenCode custom-provider example without credentials and document manual model selection, reasoning history, and model availability limits.
+- Add secret-safe reasoning-policy logs and HTTP integration tests across env, client and pool modes, including SSE, tool calls, and preserved reasoning history.
+
+### Changed
+
+- Reorganize the README around the current GLM 5.3 example and the full ZCode/OpenCode workflow; retain GLM 5.2 as the historical compatibility case.
+- Replace `.env.example` placeholders with randomly generated, explicitly invalid sample values; local `.env` credentials are unaffected.
+- Enable OpenCode GUI model sync in both dedicated Windows debug launchers, using the standard user config path and preserving Pool/Client authentication modes.
+- Run these batch launchers from their repository directory and preserve the proxy exit code; test paths with spaces and special characters through Windows CMD and PowerShell.
+
+### Fixed
+
+- Normalize only allowlisted reasoning options from legacy SDK wrappers; never forward a literal `extra_body` or merge arbitrary wrapped fields.
+- Exclude unsupported fixed sampling fields for Kimi K3 and keep unsupported effort values off other model requests.
+- Make the existing Ruff E4/E7/E9/F lint policy explicit so new Ruff defaults do not change CI's scope.
+
 ## 0.2.1 - 2026-07-24
 
 ### Added

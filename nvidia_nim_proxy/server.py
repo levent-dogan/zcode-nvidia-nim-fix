@@ -11,6 +11,7 @@ import os
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import ParseResult, urlparse
 
@@ -30,6 +31,8 @@ from nvidia_nim_proxy.key_pool import (
     PoolUnavailableError,
     PoolWaitTimeoutError,
 )
+from nvidia_nim_proxy.model_catalog import DEFAULT_REFRESH_SECONDS, ModelCatalog
+from nvidia_nim_proxy.opencode_sync import OpenCodeModelSync
 from nvidia_nim_proxy.sanitizer import ProviderContext, sanitize_chat_completion_body
 from nvidia_nim_proxy.scheduler import (
     QueueFullError,
@@ -92,6 +95,7 @@ class ProxyConfig:
         queue_wait_seconds: int = DEFAULT_QUEUE_WAIT_SECONDS,
         rate_limit_cooldown_seconds: int = DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,
         max_5xx_failovers: int = DEFAULT_MAX_5XX_FAILOVERS,
+        model_catalog: ModelCatalog | None = None,
     ) -> None:
         normalized_upstream_base_url = upstream_base_url.rstrip("/")
         validate_upstream_base_url(normalized_upstream_base_url)
@@ -100,6 +104,7 @@ class ProxyConfig:
         self.tool_call_text_mode = tool_call_text_mode
         self.api_key_mode = api_key_mode
         self.upstream_timeout_seconds = upstream_timeout_seconds
+        self.model_catalog = model_catalog
         self.credential_broker = CredentialBroker(
             mode=api_key_mode,
             env_api_key=api_key,
@@ -162,6 +167,12 @@ class NIMProxyServer(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+    model_catalog: ModelCatalog | None = None
+
+    def server_close(self) -> None:
+        if self.model_catalog is not None:
+            self.model_catalog.stop()
+        super().server_close()
 
 
 def positive_int(value: str) -> int:
@@ -471,6 +482,9 @@ def build_health_payload(config: ProxyConfig) -> dict[str, Any]:
         }
 
     payload["queue"] = {"active": active, "queued": queued}
+    payload["model_catalog"] = (
+        config.model_catalog.snapshot() if config.model_catalog else {"status": "disabled"}
+    )
     return payload
 
 
@@ -484,6 +498,36 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
         self._client_response_started = False
         if self.path == "/health":
             self._send_json(200, build_health_payload(self.config))
+            return
+
+        if self.path.rstrip("/") == "/v1/models":
+            authorization = self.headers.get("Authorization")
+            try:
+                if self.config.api_key_mode == API_KEY_MODE_POOL:
+                    self.config.credential_broker.authorize_pool_client(authorization)
+                elif self.config.api_key_mode == API_KEY_MODE_CLIENT:
+                    self.config.credential_broker.resolve_direct_key(authorization)
+            except PermissionError:
+                self._send_proxy_error(
+                    401, code="invalid_api_key", message="Invalid or missing local bearer credential"
+                )
+                return
+            catalog = self.config.model_catalog
+            if catalog is None:
+                self._send_proxy_error(
+                    503, code="model_catalog_disabled", message="Model discovery is disabled"
+                )
+                return
+            payload = catalog.payload()
+            if payload is None:
+                self._send_proxy_error(
+                    503,
+                    code="model_catalog_unavailable",
+                    message="Model catalog is not available yet",
+                    retry_after="5",
+                )
+                return
+            self._send_json(200, payload, headers={"Cache-Control": "no-store"})
             return
 
         self._send_json(404, {"error": "not_found"})
@@ -512,6 +556,9 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                 "Stripped unsupported NVIDIA NIM request keys: %s",
                 ", ".join(sanitized.stripped_keys),
             )
+
+        if sanitized.reasoning_policy:
+            logger.debug("NVIDIA NIM reasoning policy: %s", sanitized.reasoning_policy)
 
         logger.debug(
             "Forwarding chat completion request model=%r stream=%r stripped_keys=%s",
@@ -1205,7 +1252,9 @@ def build_server(host: str, port: int, config: ProxyConfig) -> NIMProxyServer:
         pass
 
     ConfiguredNIMProxyHandler.config = config
-    return NIMProxyServer((host, port), ConfiguredNIMProxyHandler)
+    server = NIMProxyServer((host, port), ConfiguredNIMProxyHandler)
+    server.model_catalog = config.model_catalog
+    return server
 
 
 def parse_args() -> argparse.Namespace:
@@ -1305,6 +1354,18 @@ def parse_args() -> argparse.Namespace:
         help="Allow binding to a non-loopback host. Unsafe with env API key mode.",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug-safe request logging.")
+    parser.add_argument(
+        "--no-model-discovery", action="store_true",
+        help="Disable public NVIDIA model catalog refresh and /v1/models.",
+    )
+    parser.add_argument(
+        "--model-refresh-seconds", type=positive_int, default=DEFAULT_REFRESH_SECONDS,
+        help="Public catalog refresh interval (minimum 30 seconds, default 21600).",
+    )
+    parser.add_argument(
+        "--opencode-config", type=Path,
+        help="Opt in to add-only nim-local model sync in this OpenCode .json file.",
+    )
     return parser.parse_args()
 
 
@@ -1341,6 +1402,18 @@ def main() -> None:
         raise SystemExit(str(exc)) from exc
 
     try:
+        catalog: ModelCatalog | None = None
+        public_upstream = args.upstream_base_url.rstrip("/") == DEFAULT_UPSTREAM_BASE_URL
+        if args.opencode_config and (args.no_model_discovery or not public_upstream):
+            raise ValueError("OpenCode sync requires discovery against the public NVIDIA endpoint")
+        if not args.no_model_discovery and public_upstream:
+            if args.opencode_config and not is_loopback_host(args.host):
+                raise ValueError("OpenCode GUI sync requires a loopback proxy host")
+            sync = (
+                OpenCodeModelSync(args.opencode_config, f"http://{args.host}:{args.port}/v1")
+                if args.opencode_config else None
+            )
+            catalog = ModelCatalog(refresh_seconds=args.model_refresh_seconds, on_refresh=sync)
         config = ProxyConfig(
             upstream_base_url=args.upstream_base_url,
             api_key=api_key,
@@ -1355,10 +1428,18 @@ def main() -> None:
             queue_wait_seconds=args.queue_wait_seconds,
             rate_limit_cooldown_seconds=args.rate_limit_cooldown_seconds,
             max_5xx_failovers=args.max_5xx_failovers,
+            model_catalog=catalog,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     server = build_server(args.host, args.port, config)
+    if catalog is not None:
+        catalog.start()
+        logger.info("Model discovery enabled: background refresh every %s seconds", args.model_refresh_seconds)
+    else:
+        logger.info("Model discovery disabled (requested or non-public upstream)")
+    if args.opencode_config:
+        logger.info("OpenCode GUI model sync enabled: add-only, existing entries preserved")
     logger.info("Listening on http://%s:%s/v1", args.host, args.port)
     logger.info("Forwarding sanitized requests to %s", args.upstream_base_url)
     logger.info("Plain-text tool_call handling mode: %s", args.tool_call_text_mode)

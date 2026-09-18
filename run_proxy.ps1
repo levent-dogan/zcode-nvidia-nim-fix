@@ -29,7 +29,14 @@ param(
     [int]$RateLimitCooldownSeconds = 60,
 
     [ValidateRange(0, 10)]
-    [int]$Max5xxFailovers = 1
+    [int]$Max5xxFailovers = 1,
+
+    [switch]$DisableModelDiscovery,
+
+    [ValidateRange(30, 604800)]
+    [int]$ModelRefreshSeconds = 21600,
+
+    [string]$OpenCodeConfig = ""
 )
 
 Set-StrictMode -Version Latest
@@ -37,6 +44,10 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ActivateScript = Join-Path $RepoRoot ".venv\Scripts\Activate.ps1"
+
+if ($DisableModelDiscovery.IsPresent -and -not [string]::IsNullOrWhiteSpace($OpenCodeConfig)) {
+    throw "OpenCode model sync cannot be used with -DisableModelDiscovery."
+}
 
 function Stop-WithMessage {
     param(
@@ -197,6 +208,18 @@ $PythonArgs = @(
 )
 if ($DebugMode.IsPresent) {
     $PythonArgs += "--debug"
+}
+$PythonArgs += @("--model-refresh-seconds", $ModelRefreshSeconds)
+if ($DisableModelDiscovery.IsPresent) {
+    $PythonArgs += "--no-model-discovery"
+}
+if (-not [string]::IsNullOrWhiteSpace($OpenCodeConfig)) {
+    $ResolvedOpenCodeConfig = if ([System.IO.Path]::IsPathRooted($OpenCodeConfig)) {
+        $OpenCodeConfig
+    } else {
+        Join-Path $RepoRoot $OpenCodeConfig
+    }
+    $PythonArgs += @("--opencode-config", $ResolvedOpenCodeConfig)
 }
 
 Write-Host "Starting ZCode NVIDIA NIM proxy on http://${DisplayHost}:${DisplayPort}/v1"
