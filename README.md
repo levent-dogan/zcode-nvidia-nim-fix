@@ -282,6 +282,6 @@ Same-key requests use FIFO queues; different healthy keys can work in parallel. 
 .\.venv\Scripts\python.exe -m pip wheel --no-deps --wheel-dir dist .
 ```
 
-CI runs Python tests, lint, type checks, wheel packaging, and Windows launcher checks. The project follows Semantic Versioning; release history is listed in [CHANGELOG.md](CHANGELOG.md). Current release: `v0.3.0`.
+CI runs Python tests, lint, type checks, wheel packaging, and Windows launcher checks. The project follows Semantic Versioning; version history is listed in [CHANGELOG.md](CHANGELOG.md). GitHub releases are currently unavailable pending maintainer approval.
 
 Roadmap: verify hosted GLM effort overrides before sending them, add exact profiles for newly documented NVIDIA models, and consider a Windows service wrapper. See [LICENSE](LICENSE) for licensing.
