@@ -206,6 +206,7 @@ def test_glm_uses_documented_native_max_without_unverified_wire_override(model: 
         "deepseek-ai/deepseek-v3.2",
         "deepseek-ai/deepseek-coder-6.7b-instruct",
         "deepseek-ai/deepseek-v4-future",
+        "deepseek-ai/deepseek-v4.1-flash",
         "untrusted/gpt-oss-copy",
         "unknown/model",
     ],

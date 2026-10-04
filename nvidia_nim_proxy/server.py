@@ -42,7 +42,7 @@ from nvidia_nim_proxy.scheduler import (
 
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8787
+DEFAULT_PORT = 18787
 DEFAULT_UPSTREAM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = 300
 DEFAULT_MAX_CONCURRENT_PER_KEY = 1
@@ -1432,14 +1432,21 @@ def main() -> None:
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    server = build_server(args.host, args.port, config)
+    try:
+        server = build_server(args.host, args.port, config)
+    except OSError as exc:
+        raise SystemExit(
+            f"Cannot listen on {args.host}:{args.port} ({type(exc).__name__}). "
+            "Check whether the port is in use or reserved by Windows, then set "
+            "NIM_PROXY_PORT to an available port and update the IDE base URL."
+        ) from None
     if catalog is not None:
         catalog.start()
         logger.info("Model discovery enabled: background refresh every %s seconds", args.model_refresh_seconds)
     else:
         logger.info("Model discovery disabled (requested or non-public upstream)")
     if args.opencode_config:
-        logger.info("OpenCode GUI model sync enabled: add-only, existing entries preserved")
+        logger.info("OpenCode GUI model sync enabled: credentials preserved")
     logger.info("Listening on http://%s:%s/v1", args.host, args.port)
     logger.info("Forwarding sanitized requests to %s", args.upstream_base_url)
     logger.info("Plain-text tool_call handling mode: %s", args.tool_call_text_mode)

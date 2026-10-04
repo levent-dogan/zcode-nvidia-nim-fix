@@ -180,7 +180,7 @@ $DisplayHost = if ([string]::IsNullOrWhiteSpace($env:NIM_PROXY_HOST)) {
     $env:NIM_PROXY_HOST
 }
 $DisplayPort = if ([string]::IsNullOrWhiteSpace($env:NIM_PROXY_PORT)) {
-    "8787"
+    "18787"
 } else {
     $env:NIM_PROXY_PORT
 }

@@ -58,7 +58,9 @@ def forwarded(
 
 
 def test_default_launcher_client_mode(tmp_path: Path) -> None:
-    args = forwarded(launch(tmp_path, "-ApiKeyMode Client"))
+    result = launch(tmp_path, "-ApiKeyMode Client")
+    args = forwarded(result)
+    assert "http://127.0.0.1:18787/v1" in result.stdout
     assert args[args.index("--api-key-mode") + 1] == "client"
     assert args[args.index("--model-refresh-seconds") + 1] == 21600
     assert "--debug" not in args

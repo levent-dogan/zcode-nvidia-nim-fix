@@ -31,6 +31,63 @@ def test_sync_creates_secret_free_gui_config_and_is_idempotent(tmp_path: Path) -
     assert not list(path.parent.glob(".nim-sync-*"))
 
 
+def test_live_chat_models_replace_only_retired_deepseek_entries(tmp_path: Path) -> None:
+    path = tmp_path / "opencode.json"
+    path.write_text(json.dumps({"provider": {"nim-local": {
+        "npm": "@ai-sdk/openai-compatible",
+        "options": {"baseURL": URL, "apiKey": "private-local"},
+        "models": {
+            "deepseek-ai/deepseek-v4-flash-0731": {"name": "retired"},
+            "custom/manual": {"name": "keep"},
+        },
+    }}}))
+    models = (
+        "deepseek-ai/deepseek-v4.1-flash",
+        "z-ai/glm-5.3-flash",
+        "nvidia/nemotron-3-ultra-550b-a55b",
+        "nvidia/embed-qa-4",
+    )
+    assert OpenCodeModelSync(path, URL, tmp_path / "backups").sync(models) == 4
+    updated = json.loads(path.read_text())["provider"]["nim-local"]
+    assert updated["options"]["apiKey"] == "private-local"
+    assert set(updated["models"]) == {
+        "deepseek-ai/deepseek-v4.1-flash",
+        "z-ai/glm-5.3-flash",
+        "nvidia/nemotron-3-ultra-550b-a55b",
+        "custom/manual",
+    }
+
+
+def test_existing_direct_nvidia_providers_sync_without_changing_credentials() -> None:
+    config = {"provider": {
+        "nvidia_nim_1": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {
+                "baseURL": "https://integrate.api.nvidia.com/v1",
+                "apiKey": "private-key",
+            },
+            "models": {"deepseek-ai/deepseek-v4-pro": {"name": "old"}},
+        },
+        "other": {"models": {"deepseek-ai/deepseek-v4-pro": {"name": "keep"}}},
+    }}
+    updated, changed = merge_models(config, ("deepseek-ai/deepseek-v4.1-flash",), URL)
+    assert changed == 3  # local add, direct add, direct retired-ID removal
+    direct = updated["provider"]["nvidia_nim_1"]
+    assert direct["options"]["apiKey"] == "private-key"
+    assert set(direct["models"]) == {"deepseek-ai/deepseek-v4.1-flash"}
+    assert updated["provider"]["other"] == config["provider"]["other"]
+    assert "nim-local" not in config["provider"]
+
+
+def test_direct_provider_endpoint_mismatch_fails_closed() -> None:
+    config = {"provider": {"nvidia_nim_1": {
+        "npm": "@ai-sdk/openai-compatible",
+        "options": {"baseURL": "https://other.example/v1"},
+    }}}
+    with pytest.raises(OpenCodeSyncError, match="different endpoint"):
+        merge_models(config, ("deepseek-ai/deepseek-v4.1-flash",), URL)
+
+
 def test_preserves_manual_models_defaults_credentials_and_other_providers(tmp_path: Path) -> None:
     path = tmp_path / "opencode.json"
     config = {
@@ -53,8 +110,12 @@ def test_preserves_manual_models_defaults_credentials_and_other_providers(tmp_pa
     path.write_bytes(original)
     backup_dir = tmp_path / "private-backups"
     sync = OpenCodeModelSync(path, URL, backup_dir)
-    assert sync.sync(MODELS) == 1
+    assert sync.sync(MODELS) == 2  # new GLM model plus missing Kimi limits
     updated = json.loads(path.read_bytes())
+    assert updated["provider"]["nim-local"]["models"]["moonshotai/kimi-k3"]["limit"] == {
+        "context": 1048576, "output": 16384,
+    }
+    del updated["provider"]["nim-local"]["models"]["moonshotai/kimi-k3"]["limit"]
     del updated["provider"]["nim-local"]["models"]["z-ai/glm-5.3"]
     assert updated == config
     backups = list(backup_dir.glob("*.bak"))
@@ -173,3 +234,60 @@ def test_config_size_limit_and_bom(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(module, "MAX_CONFIG_BYTES", 10)
     with pytest.raises(OpenCodeSyncError, match="size limit"):
         OpenCodeModelSync(path, URL).sync(MODELS)
+
+
+def test_legacy_limits_migrate_for_local_and_all_six_direct_providers() -> None:
+    ids = ("moonshotai/kimi-k3", "z-ai/glm-5.3", "openai/gpt-oss-20b")
+    providers = {
+        pid: {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {
+                "baseURL": URL if pid == "nim-local" else module.DIRECT_BASE_URL,
+                "apiKey": "private-test-value",
+            },
+            "models": {model: {
+                "name": "user name", "options": {"reasoningEffort": "low"},
+                "limit": {"context": 131072, "output": 16384},
+            } for model in ids},
+        } for pid in ("nim-local", *module.DIRECT_PROVIDER_IDS)
+    }
+    config: dict[str, Any] = {"provider": providers, "compaction": {"auto": True}}
+    updated, changed = merge_models(config, ids, URL)
+    assert changed == 21
+    for provider in updated["provider"].values():
+        assert provider["options"]["apiKey"] == "private-test-value"
+        assert provider["models"][ids[0]]["limit"]["context"] == 1048576
+        assert provider["models"][ids[2]]["limit"] == {"context": 131072, "output": 4096}
+        assert provider["models"][ids[0]]["options"] == {"reasoningEffort": "low"}
+    assert config["provider"]["nim-local"]["models"][ids[0]]["limit"]["context"] == 131072
+    assert updated["compaction"] == config["compaction"]
+    again, changed = merge_models(updated, ids, URL)
+    assert changed == 0
+    assert again == updated
+
+
+@pytest.mark.parametrize("limits", [
+    {"context": 202749, "output": 8192},
+    {"context": 131072, "output": 8192},
+    {"context": 131072, "output": 16384, "input": 100000},
+    {"context": 1048576, "output": 32768},
+    None,
+])
+def test_explicit_non_template_limits_are_preserved(limits: Any) -> None:
+    config = {"provider": {"nim-local": {
+        "npm": "@ai-sdk/openai-compatible", "options": {"baseURL": URL},
+        "models": {"moonshotai/kimi-k3": {"limit": limits}},
+    }}}
+    updated, changed = merge_models(config, ("moonshotai/kimi-k3",), URL)
+    assert changed == 0
+    assert updated == config
+
+
+def test_invalid_existing_model_fails_closed() -> None:
+    config: dict[str, Any] = {"provider": {"nim-local": {
+        "npm": "@ai-sdk/openai-compatible", "options": {"baseURL": URL},
+        "models": {"moonshotai/kimi-k3": []},
+    }}}
+    with pytest.raises(OpenCodeSyncError, match="model settings"):
+        merge_models(config, ("moonshotai/kimi-k3",), URL)
+    assert config["provider"]["nim-local"]["models"]["moonshotai/kimi-k3"] == []

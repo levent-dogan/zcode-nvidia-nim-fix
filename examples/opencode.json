@@ -6,7 +6,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "Local NVIDIA NIM Proxy",
       "options": {
-        "baseURL": "http://127.0.0.1:8787/v1"
+        "baseURL": "http://127.0.0.1:18787/v1"
       },
       "models": {
         "z-ai/glm-5.3": {
@@ -14,28 +14,28 @@
           "reasoning": true,
           "tool_call": true,
           "interleaved": { "field": "reasoning_content" },
-          "limit": { "context": 131072, "output": 16384 }
+          "limit": { "context": 1048576, "output": 16384 }
         },
         "z-ai/glm-5.3-flash": {
           "name": "GLM 5.3 Flash (NIM native max)",
           "reasoning": true,
           "tool_call": true,
           "interleaved": { "field": "reasoning_content" },
-          "limit": { "context": 131072, "output": 16384 }
+          "limit": { "context": 1048576, "output": 16384 }
         },
         "moonshotai/kimi-k3": {
           "name": "Kimi K3 (proxy max default)",
           "reasoning": true,
           "tool_call": true,
           "interleaved": { "field": "reasoning_content" },
-          "limit": { "context": 131072, "output": 16384 }
+          "limit": { "context": 1048576, "output": 16384 }
         },
-        "deepseek-ai/deepseek-v4-flash-0731": {
-          "name": "DeepSeek V4 Flash 0731 (proxy max default)",
+        "deepseek-ai/deepseek-v4.1-flash": {
+          "name": "DeepSeek V4.1 Flash (hosted effort unverified)",
           "reasoning": true,
           "tool_call": true,
           "interleaved": { "field": "reasoning_content" },
-          "limit": { "context": 131072, "output": 16384 }
+          "limit": { "context": 1048576, "output": 16384 }
         }
       }
     }
