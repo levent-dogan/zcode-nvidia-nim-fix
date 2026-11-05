@@ -327,24 +327,3 @@ Queue defaults are conservative. Higher concurrency can increase NVIDIA `429` re
 Same-key requests use FIFO queues; different healthy keys can work in parallel. In Pool mode, a key is tried at most once per request. NVIDIA `408`/`429` cools a key, `401`/`403` quarantines it until restart, and `400`/`404`/`422` does not trigger key switching. After an SSE stream starts, the proxy cannot safely retry it on another key. When failover is exhausted, the last upstream response is returned so the client sees its real status.
 
 `GET /health` exposes aggregate queue and pool counts, not credential values. Restarting the proxy clears its in-memory queue but does not erase NVIDIA rate limits or any in-flight work already sent upstream.
-
-## Security and Publication
-
-- Real API keys belong only in your local `.env`, process environment, or IDE credential store. Never copy them into README examples, tracked JSON, screenshots, Git commits, issues, or releases.
-- `.env`, `.env.*`, `.venv/`, build artifacts, and local caches are excluded by `.gitignore`. `.env.example` contains random **invalid** values solely to show the expected variable names.
-- The default bind address is `127.0.0.1`. Remote binding requires an explicit override and is forbidden in Env mode. If you deliberately expose Client/Pool mode on a network, add TLS termination and firewall controls.
-- Pool mode validates the local token without forwarding it to NVIDIA. Client mode forwards the supplied NVIDIA token upstream. Logs omit keys and full message content.
-- Keep OpenCode configs, `auth.json`, proxy cache backups, and any exported logs private. A local config backup may contain credentials that predate this proxy.
-
-## Development and Releases
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest
-.\.venv\Scripts\python.exe -m ruff check .
-.\.venv\Scripts\python.exe -m mypy nvidia_nim_proxy tests
-.\.venv\Scripts\python.exe -m pip wheel --no-deps --wheel-dir dist .
-```
-
-CI runs Python tests, lint, type checks, wheel packaging, and Windows launcher checks. The project follows Semantic Versioning; version history is listed in [CHANGELOG.md](CHANGELOG.md). GitHub releases are currently unavailable pending maintainer approval.
-
-Roadmap: verify hosted GLM effort overrides before sending them, add exact profiles for newly documented NVIDIA models, and consider a Windows service wrapper. See [LICENSE](LICENSE) for licensing.
