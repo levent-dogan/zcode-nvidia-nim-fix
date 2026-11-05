@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from nvidia_nim_proxy.credentials import fingerprint_secret
-from nvidia_nim_proxy.server import ProxyConfig, build_server
+from nvidia_nim_proxy.server import MAX_JSON_DEPTH, ProxyConfig, build_server
 
 
 @contextmanager
@@ -139,6 +139,21 @@ def test_invalid_json_returns_400_without_upstream_call(body: bytes) -> None:
         finally:
             conn.close()
         assert not received
+
+
+@pytest.mark.parametrize("depth, expected", [(MAX_JSON_DEPTH, 200), (MAX_JSON_DEPTH + 1, 400)])
+def test_json_nesting_limit_is_enforced_before_sanitizing(depth: int, expected: int) -> None:
+    arrays = depth - 1  # The top-level object also counts.
+    body = b'{"model":"test","messages":[],"extra_body":' + b'[' * arrays + b'null' + b']' * arrays + b'}'
+    with local_proxy("env") as (port, _, received):
+        conn = send(port, body)
+        try:
+            response = conn.getresponse()
+            assert response.status == expected
+            response.read()
+        finally:
+            conn.close()
+        assert len(received) == (1 if expected == 200 else 0)
 
 
 @pytest.mark.parametrize("stream", [False, True])

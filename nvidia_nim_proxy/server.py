@@ -62,6 +62,7 @@ DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 60
 DEFAULT_MAX_5XX_FAILOVERS = 1
 POOL_RETRY_MAX_BACKOFF_SECONDS = 30
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
+MAX_JSON_DEPTH = 128
 STREAM_CHUNK_SIZE = 8192
 STREAM_DIAGNOSTIC_SCAN_BYTES = 8 * 1024
 STREAM_DIAGNOSTIC_SCAN_EVENTS = 8
@@ -94,6 +95,21 @@ def finite_json_float(value: str) -> float:
     if not math.isfinite(parsed):
         raise ValueError("non-finite JSON number")
     return parsed
+
+
+def validate_json_depth(body: dict[str, Any]) -> None:
+    """Bound container nesting independently of Python's decoder recursion limit."""
+    frames = [iter(body.values())]
+    while frames:
+        for child in frames[-1]:
+            if not isinstance(child, (dict, list)):
+                continue
+            if len(frames) >= MAX_JSON_DEPTH:
+                raise ValueError("invalid JSON request body: nesting limit exceeded")
+            frames.append(iter(child.values() if isinstance(child, dict) else child))
+            break
+        else:
+            frames.pop()
 
 
 class ProxyConfig:
@@ -655,6 +671,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
         if not isinstance(decoded, dict):
             raise ValueError("JSON request body must be an object")
 
+        validate_json_depth(decoded)
         return decoded
 
     def _forward_to_nim(
