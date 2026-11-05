@@ -1,8 +1,10 @@
 # NVIDIA NIM Local Proxy for ZCode and OpenCode
 
-`zcode-nvidia-nim-fix` is a local OpenAI-compatible Chat Completions proxy for NVIDIA NIM. It started as a workaround for ZCode sending a literal `extra_body` field, which NVIDIA rejects. It now supports model-specific request mapping, a private API-key pool, bounded queues, streaming, a cached model catalog, and optional OpenCode model synchronization. The package and repository names retain the original ZCode name; the proxy also works with other compatible clients.
+`zcode-nvidia-nim-fix` is a Windows-friendly, local OpenAI-compatible Chat Completions proxy for NVIDIA NIM. It works with ZCode, OpenCode, and other compatible clients. It provides model-specific request mapping, a private API-key pool, request queues, streaming, a cached model catalog, and optional OpenCode model synchronization.
 
-**Current example model:** `z-ai/glm-5.3`. The proxy is not tied to this model. Check [NVIDIA's model catalog](https://integrate.api.nvidia.com/v1/models) and the chosen model's Chat Completions documentation before adding an ID. A catalog entry alone does not guarantee chat support or access for your key. GLM 5.2 remains supported where NVIDIA offers it, but it is now a historical example of the original `extra_body` error.
+**How it started:** When ZCode sent a Chat Completions request for GLM 5.2 (`z-ai/glm-5.2`), NVIDIA NIM rejected the literal `extra_body` field with HTTP 400. This project began as a local workaround that stripped the unsupported wrapper. GLM 5.2 is part of the project's history, not a requirement or a current model recommendation.
+
+Check [NVIDIA's model catalog](https://build.nvidia.com/models) and the selected model's Chat Completions documentation before adding a model ID. A catalog entry alone does not guarantee Chat Completions support or access for your key.
 
 ## At a Glance
 
@@ -262,7 +264,7 @@ Invoke-RestMethod -Method Post `
 
 The original ZCode failure was a request containing literal `extra_body`. The proxy drops that wrapper; only documented model-specific options may be mapped out of it. The GLM 5.2 case is retained in [the sanitizer tests](tests/test_integration.py). Do not send `extra_body` in a direct NVIDIA request.
 
-The screenshot below shows an older GLM 5.2 session with `extra_body` stripped. The current example above uses GLM 5.3.
+The screenshot below shows the original workaround in an older GLM 5.2 session, with `extra_body` stripped.
 
 ![Historical proxy console example](screenshot/screenshot_1.png)
 
