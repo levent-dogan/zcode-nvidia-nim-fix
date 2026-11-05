@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from nvidia_nim_proxy.model_catalog import cache_directory
-from nvidia_nim_proxy.model_limits import LEGACY_MODEL_LIMIT, MODEL_CONTEXT_LIMITS, model_limits
+from nvidia_nim_proxy.model_limits import (
+    LEGACY_MODEL_LIMIT,
+    MODEL_CONTEXT_LIMITS,
+    RETIRED_HOSTED_MODELS,
+    model_limits,
+)
 
 PROVIDER_ID = "nim-local"
 DIRECT_PROVIDER_IDS = tuple(f"nvidia_nim_{index}" for index in range(1, 7))
@@ -24,7 +29,15 @@ logger = logging.getLogger("zcode-nim-proxy")
 
 # The public /v1/models feed also includes embeddings, safety classifiers and
 # non-chat endpoints. Only sync IDs with a documented chat-completions use case.
-OPENCODE_CHAT_MODELS = frozenset(MODEL_CONTEXT_LIMITS)
+OPENCODE_CHAT_MODELS = frozenset(MODEL_CONTEXT_LIMITS) - RETIRED_HOSTED_MODELS
+# Only these previously generated DeepSeek entries are eligible for migration.
+# A provider prefix is not evidence that a manually added model is obsolete.
+LEGACY_DEEPSEEK_MODELS = frozenset({
+    "deepseek-ai/deepseek-v4-pro",
+    "deepseek-ai/deepseek-v4-pro-0813",
+    "deepseek-ai/deepseek-v4-flash",
+    "deepseek-ai/deepseek-v4-flash-0731",
+})
 
 
 class OpenCodeSyncError(ValueError):
@@ -54,7 +67,7 @@ def _read_config(path: Path) -> bytes | None:
 
 
 def _merge_provider_models(
-    provider: Any, provider_id: str, base_url: str, eligible: list[str]
+    provider: Any, provider_id: str, base_url: str, eligible: list[str], available: frozenset[str]
 ) -> int:
     if not isinstance(provider, dict):
         raise OpenCodeSyncError(f"{provider_id} provider configuration is not an object")
@@ -70,7 +83,9 @@ def _merge_provider_models(
         raise OpenCodeSyncError(f"{provider_id} model configuration is not an object")
     changed = 0
     for model in list(models):
-        if model.startswith("deepseek-ai/") and model != "deepseek-ai/deepseek-v4.1-flash":
+        if model in RETIRED_HOSTED_MODELS or (
+            model in LEGACY_DEEPSEEK_MODELS and model not in available
+        ):
             del models[model]
             changed += 1
     for model in eligible:
@@ -100,7 +115,8 @@ def _merge_provider_models(
 def merge_models(
     config: dict[str, Any], model_ids: tuple[str, ...], base_url: str
 ) -> tuple[dict[str, Any], int]:
-    """Reconcile known NVIDIA chat models without touching credentials or manual non-DeepSeek IDs."""
+    """Reconcile known NVIDIA chat models without touching credentials or unknown manual IDs."""
+    available = frozenset(model_ids)
     eligible = sorted(set(model_ids) & OPENCODE_CHAT_MODELS)
     result = deepcopy(config)
     if not eligible:
@@ -117,11 +133,11 @@ def merge_models(
             "models": {},
         },
     )
-    changed = _merge_provider_models(provider, PROVIDER_ID, base_url, eligible)
+    changed = _merge_provider_models(provider, PROVIDER_ID, base_url, eligible, available)
     for provider_id in DIRECT_PROVIDER_IDS:
         if provider_id in providers:
             changed += _merge_provider_models(
-                providers[provider_id], provider_id, DIRECT_BASE_URL, eligible
+                providers[provider_id], provider_id, DIRECT_BASE_URL, eligible, available
             )
     return result, changed
 

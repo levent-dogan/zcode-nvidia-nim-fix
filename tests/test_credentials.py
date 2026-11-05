@@ -89,7 +89,7 @@ def test_pool_auth_uses_local_key_but_never_returns_it_as_upstream_key() -> None
 
 @pytest.mark.parametrize(
     "authorization",
-    [None, "", "Basic local-only-secret", "Bearer wrong-secret"],
+    [None, "", "Basic local-only-secret", "Bearer wrong-secret", "Bearer wrong-\u00e9"],
 )
 def test_pool_auth_rejects_missing_or_incorrect_local_key(
     authorization: str | None,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import http.client
 import logging
+import socket
 import time
 from pathlib import Path
 from threading import Event
@@ -26,6 +27,32 @@ def catalog_payload(*ids: str) -> dict[str, Any]:
             {"id": model, "object": "model", "created": 0, "owned_by": "nvidia"} for model in ids
         ],
     }
+
+
+def test_catalog_dns_failure_preserves_cache_and_explains_network_issue(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    syncs: list[tuple[str, ...]] = []
+    catalog = ModelCatalog(
+        tmp_path / "models.json",
+        fetcher=lambda: catalog_payload("deepseek-ai/deepseek-v4.1-flash"),
+        on_refresh=syncs.append,
+    )
+    assert catalog.refresh()
+    previous = catalog.payload()
+    cached = catalog.cache_path.read_bytes()
+
+    def fail_dns() -> Any:
+        raise socket.gaierror(11001, "private-secret-must-not-appear")
+
+    catalog._fetcher = fail_dns
+    assert catalog.refresh() is False
+    assert catalog.payload() == previous
+    assert catalog.cache_path.read_bytes() == cached
+    assert catalog.snapshot()["status"] == "stale"
+    assert len(syncs) == 1
+    assert "check host DNS/network (not API keys)" in caplog.text
+    assert "private-secret" not in caplog.text
 
 
 def test_catalog_normalizes_metadata_and_returns_defensive_copies(tmp_path: Path) -> None:

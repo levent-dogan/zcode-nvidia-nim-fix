@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import socket
 import re
 import tempfile
 import time
@@ -194,8 +195,10 @@ class ModelCatalog:
                 with self._lock:
                     self._failed = True
                 logger.warning(
-                    "Model catalog refresh failed: error=%s; retaining last good list",
+                    "Model catalog refresh failed: error=%s; retaining last good list%s",
                     type(exc).__name__,
+                    "; check host DNS/network (not API keys)"
+                    if isinstance(exc, socket.gaierror) else "",
                 )
                 return False
             if self._stop.is_set():

@@ -31,6 +31,8 @@ param(
     [ValidateRange(0, 10)]
     [int]$Max5xxFailovers = 1,
 
+    [switch]$PoolRetryLoop,
+
     [switch]$DisableModelDiscovery,
 
     [ValidateRange(30, 604800)]
@@ -47,6 +49,9 @@ $ActivateScript = Join-Path $RepoRoot ".venv\Scripts\Activate.ps1"
 
 if ($DisableModelDiscovery.IsPresent -and -not [string]::IsNullOrWhiteSpace($OpenCodeConfig)) {
     throw "OpenCode model sync cannot be used with -DisableModelDiscovery."
+}
+if ($PoolRetryLoop.IsPresent -and $ApiKeyMode -ne "Pool") {
+    throw "-PoolRetryLoop requires -ApiKeyMode Pool."
 }
 
 function Stop-WithMessage {
@@ -209,6 +214,9 @@ $PythonArgs = @(
 if ($DebugMode.IsPresent) {
     $PythonArgs += "--debug"
 }
+if ($PoolRetryLoop.IsPresent) {
+    $PythonArgs += "--pool-retry-loop"
+}
 $PythonArgs += @("--model-refresh-seconds", $ModelRefreshSeconds)
 if ($DisableModelDiscovery.IsPresent) {
     $PythonArgs += "--no-model-discovery"
@@ -231,14 +239,23 @@ Write-Host "Queue: $MaxConcurrentPerKey active per key, $MaxQueuePerKey waiting 
 if ($ApiKeyMode -eq "Pool") {
     Write-Host "NVIDIA key pool entries loaded: $($NumberedKeyNames.Count)"
 }
+if ($PoolRetryLoop.IsPresent) {
+    Write-Host "Pool retry loop enabled while clients stay connected. Press Ctrl+C to stop the proxy."
+}
 if ($DebugMode.IsPresent) {
     Write-Host "Debug-safe logging enabled. API keys and full message content are not printed by the proxy."
 }
 
+$LocationPushed = $false
 try {
+    Push-Location -LiteralPath $RepoRoot
+    $LocationPushed = $true
     python @PythonArgs
     exit $LASTEXITCODE
 } finally {
+    if ($LocationPushed) {
+        Pop-Location
+    }
     foreach ($Name in $ManagedEnvironmentNames) {
         $Original = $OriginalEnvironment[$Name]
         if ($Original.Exists) {

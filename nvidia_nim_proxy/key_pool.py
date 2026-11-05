@@ -14,6 +14,9 @@ from typing import Callable
 
 from nvidia_nim_proxy.credentials import fingerprint_secret
 
+POOL_RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504, 529})
+POOL_CANCEL_POLL_SECONDS = 0.25
+
 
 class PoolUnavailableError(RuntimeError):
     """Raised when no untried NVIDIA key can become available."""
@@ -25,6 +28,10 @@ class PoolQueueFullError(RuntimeError):
 
 class PoolWaitTimeoutError(TimeoutError):
     """Raised when a pool request cannot acquire a key before its deadline."""
+
+
+class PoolWaitCancelledError(RuntimeError):
+    """Raised when a waiting client has disconnected."""
 
 
 @dataclass(frozen=True)
@@ -161,6 +168,7 @@ class NvidiaKeyPool:
         default_cooldown_seconds: int,
         max_5xx_failovers: int,
         clock: Callable[[], float] = time.monotonic,
+        honor_retryable_5xx_retry_after: bool = False,
     ) -> None:
         if not keys:
             raise ValueError("NVIDIA key pool must contain at least one key")
@@ -184,6 +192,7 @@ class NvidiaKeyPool:
         self.queue_wait_seconds = queue_wait_seconds
         self.default_cooldown_seconds = default_cooldown_seconds
         self.max_5xx_failovers = max_5xx_failovers
+        self._honor_retryable_5xx_retry_after = honor_retryable_5xx_retry_after
         self._clock = clock
         self._condition = Condition()
         self._states = [
@@ -193,13 +202,23 @@ class NvidiaKeyPool:
         self._waiters: deque[_PoolTicket] = deque()
         self._cursor = -1
 
-    def acquire(self, attempted: frozenset[str]) -> PoolLease:
-        """Select a healthy untried key or wait in the process-wide FIFO queue."""
+    def acquire(
+        self,
+        attempted: frozenset[str],
+        *,
+        cancelled: Callable[[], bool] | None = None,
+        wait_forever: bool = False,
+    ) -> PoolLease:
+        """Wait in the bounded FIFO, optionally without a deadline in cancellable loop mode."""
 
+        if wait_forever and cancelled is None:
+            raise ValueError("unbounded queue waits require cancellation")
         started_at = time.monotonic()
         deadline = started_at + self.queue_wait_seconds
 
         with self._condition:
+            if cancelled is not None and cancelled():
+                raise PoolWaitCancelledError("client disconnected")
             if not self._waiters:
                 selected = self._select_available(attempted)
                 if selected is not None:
@@ -221,11 +240,15 @@ class NvidiaKeyPool:
             queue_position = len(self._waiters)
 
             while True:
+                if cancelled is not None and cancelled():
+                    self._remove_waiter(ticket)
+                    raise PoolWaitCancelledError("client disconnected")
                 if self._waiters[0] is ticket:
                     selected = self._select_available(ticket.attempted)
                     if selected is not None:
                         self._waiters.popleft()
                         selected.active += 1
+                        self._condition.notify_all()
                         return PoolLease(
                             pool=self,
                             state=selected,
@@ -238,12 +261,16 @@ class NvidiaKeyPool:
                             "no untried NVIDIA key is available"
                         )
 
-                remaining = deadline - time.monotonic()
+                remaining = (
+                    deadline - time.monotonic()
+                    if not wait_forever else POOL_CANCEL_POLL_SECONDS
+                )
                 if remaining <= 0:
                     self._remove_waiter(ticket)
                     raise PoolWaitTimeoutError("NVIDIA key pool wait timed out")
 
-                self._condition.wait(min(remaining, self._next_state_change_delay(attempted)))
+                delay = min(remaining, self._next_state_change_delay(attempted))
+                self._condition.wait(min(delay, POOL_CANCEL_POLL_SECONDS) if cancelled else delay)
 
     def should_failover(self, status: int, *, five_xx_failovers: int) -> bool:
         """Return whether pool mode may retry this status with another key."""
@@ -337,11 +364,17 @@ class NvidiaKeyPool:
             status = lease._status
             if status in {401, 403}:
                 lease._state.quarantined = True
-            elif status in {408, 429}:
+            elif status in {408, 429} or (
+                self._honor_retryable_5xx_retry_after
+                and status in POOL_RETRYABLE_STATUSES
+                and lease._retry_after is not None
+            ):
                 cooldown_seconds = parse_retry_after_seconds(
                     lease._retry_after,
                     default_seconds=self.default_cooldown_seconds,
                 )
-                lease._state.cooldown_until = self._clock() + cooldown_seconds
+                lease._state.cooldown_until = max(
+                    lease._state.cooldown_until, self._clock() + min(cooldown_seconds, 2**31 - 1)
+                )
 
             self._condition.notify_all()

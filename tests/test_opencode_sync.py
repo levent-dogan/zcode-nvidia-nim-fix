@@ -8,11 +8,12 @@ from typing import Any
 import pytest
 
 import nvidia_nim_proxy.opencode_sync as module
+from nvidia_nim_proxy.model_limits import MODEL_CONTEXT_LIMITS, RETIRED_HOSTED_MODELS
 from nvidia_nim_proxy.opencode_sync import OpenCodeModelSync, OpenCodeSyncError, merge_models
 
 
 URL = "http://127.0.0.1:8787/v1"
-MODELS = ("moonshotai/kimi-k3", "z-ai/glm-5.3", "nvidia/embed-qa-4", "unknown/model")
+MODELS = ("z-ai/glm-5.3-flash", "mistralai/mistral-large-4-1t-a52b", "nvidia/embed-qa-4", "unknown/model")
 
 
 def test_sync_creates_secret_free_gui_config_and_is_idempotent(tmp_path: Path) -> None:
@@ -23,7 +24,7 @@ def test_sync_creates_secret_free_gui_config_and_is_idempotent(tmp_path: Path) -
     config = json.loads(original)
     provider = config["provider"]["nim-local"]
     assert provider["options"] == {"baseURL": URL}
-    assert set(provider["models"]) == {"moonshotai/kimi-k3", "z-ai/glm-5.3"}
+    assert set(provider["models"]) == {"z-ai/glm-5.3-flash", "mistralai/mistral-large-4-1t-a52b"}
     assert "apiKey" not in original.decode()
     assert "model" not in config
     assert sync.sync(MODELS) == 0
@@ -100,7 +101,7 @@ def test_preserves_manual_models_defaults_credentials_and_other_providers(tmp_pa
                 "name": "my name",
                 "options": {"baseURL": URL, "apiKey": "private-local", "timeout": 600000},
                 "models": {
-                    "moonshotai/kimi-k3": {"name": "custom", "options": {"reasoningEffort": "low"}},
+                    "z-ai/glm-5.3-flash": {"name": "custom", "options": {"reasoningEffort": "low"}},
                     "manual/model": {"name": "manually added"},
                 },
             },
@@ -110,19 +111,19 @@ def test_preserves_manual_models_defaults_credentials_and_other_providers(tmp_pa
     path.write_bytes(original)
     backup_dir = tmp_path / "private-backups"
     sync = OpenCodeModelSync(path, URL, backup_dir)
-    assert sync.sync(MODELS) == 2  # new GLM model plus missing Kimi limits
+    assert sync.sync(MODELS) == 2  # new GLM model plus missing Flash limits
     updated = json.loads(path.read_bytes())
-    assert updated["provider"]["nim-local"]["models"]["moonshotai/kimi-k3"]["limit"] == {
+    assert updated["provider"]["nim-local"]["models"]["z-ai/glm-5.3-flash"]["limit"] == {
         "context": 1048576, "output": 16384,
     }
-    del updated["provider"]["nim-local"]["models"]["moonshotai/kimi-k3"]["limit"]
-    del updated["provider"]["nim-local"]["models"]["z-ai/glm-5.3"]
+    del updated["provider"]["nim-local"]["models"]["z-ai/glm-5.3-flash"]["limit"]
+    del updated["provider"]["nim-local"]["models"]["mistralai/mistral-large-4-1t-a52b"]
     assert updated == config
     backups = list(backup_dir.glob("*.bak"))
     assert len(backups) == 1
     assert backups[0].read_bytes() == original
     before = path.read_bytes()
-    assert sync.sync(("z-ai/glm-5.3",)) == 0
+    assert sync.sync(("mistralai/mistral-large-4-1t-a52b",)) == 0
     assert path.read_bytes() == before
 
 
@@ -159,6 +160,27 @@ def test_no_models_no_file_created(tmp_path: Path) -> None:
     sync = OpenCodeModelSync(path, URL)
     assert sync.sync(("nvidia/embed-qa-4", "other/unknown")) == 0
     assert not path.exists()
+
+
+def test_manual_future_deepseek_model_is_not_deleted() -> None:
+    manual = {"name": "my model", "limit": {"context": 12345, "output": 1000}}
+    config = {"provider": {"nim-local": {
+        "npm": "@ai-sdk/openai-compatible", "options": {"baseURL": URL},
+        "models": {"deepseek-ai/future-manual-model": manual},
+    }}}
+    updated, _ = merge_models(config, MODELS, URL)
+    assert updated["provider"]["nim-local"]["models"]["deepseek-ai/future-manual-model"] == manual
+
+
+def test_legacy_deepseek_still_in_catalog_keeps_manual_settings() -> None:
+    model = "deepseek-ai/deepseek-v4-pro"
+    manual = {"name": "custom", "limit": {"context": 12345, "output": 1000}}
+    config = {"provider": {"nim-local": {
+        "npm": "@ai-sdk/openai-compatible", "options": {"baseURL": URL},
+        "models": {model: manual},
+    }}}
+    updated, _ = merge_models(config, (*MODELS, model), URL)
+    assert updated["provider"]["nim-local"]["models"][model] == manual
 
 
 def test_sync_never_updates_key_files_or_jsonc(tmp_path: Path) -> None:
@@ -237,7 +259,7 @@ def test_config_size_limit_and_bom(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 def test_legacy_limits_migrate_for_local_and_all_six_direct_providers() -> None:
-    ids = ("moonshotai/kimi-k3", "z-ai/glm-5.3", "openai/gpt-oss-20b")
+    ids = ("z-ai/glm-5.3-flash", "mistralai/mistral-large-4-1t-a52b", "openai/gpt-oss-20b")
     providers = {
         pid: {
             "npm": "@ai-sdk/openai-compatible",
@@ -276,9 +298,9 @@ def test_legacy_limits_migrate_for_local_and_all_six_direct_providers() -> None:
 def test_explicit_non_template_limits_are_preserved(limits: Any) -> None:
     config = {"provider": {"nim-local": {
         "npm": "@ai-sdk/openai-compatible", "options": {"baseURL": URL},
-        "models": {"moonshotai/kimi-k3": {"limit": limits}},
+        "models": {"z-ai/glm-5.3-flash": {"limit": limits}},
     }}}
-    updated, changed = merge_models(config, ("moonshotai/kimi-k3",), URL)
+    updated, changed = merge_models(config, ("z-ai/glm-5.3-flash",), URL)
     assert changed == 0
     assert updated == config
 
@@ -286,8 +308,44 @@ def test_explicit_non_template_limits_are_preserved(limits: Any) -> None:
 def test_invalid_existing_model_fails_closed() -> None:
     config: dict[str, Any] = {"provider": {"nim-local": {
         "npm": "@ai-sdk/openai-compatible", "options": {"baseURL": URL},
-        "models": {"moonshotai/kimi-k3": []},
+        "models": {"z-ai/glm-5.3-flash": []},
     }}}
     with pytest.raises(OpenCodeSyncError, match="model settings"):
-        merge_models(config, ("moonshotai/kimi-k3",), URL)
-    assert config["provider"]["nim-local"]["models"]["moonshotai/kimi-k3"] == []
+        merge_models(config, ("z-ai/glm-5.3-flash",), URL)
+    assert config["provider"]["nim-local"]["models"]["z-ai/glm-5.3-flash"] == []
+
+
+def test_retired_free_endpoints_removed_from_all_seven_providers() -> None:
+    retired = RETIRED_HOSTED_MODELS
+    providers = {
+        pid: {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {
+                "baseURL": URL if pid == "nim-local" else module.DIRECT_BASE_URL,
+                "apiKey": "private-test-value",
+            },
+            "models": {model: {"name": "old"} for model in (*retired, "custom/manual")},
+        } for pid in ("nim-local", *module.DIRECT_PROVIDER_IDS)
+    }
+    config = {"provider": providers, "model": "nim-local/moonshotai/kimi-k3"}
+    # A stale ID in an otherwise successful catalog must not revive a retired endpoint.
+    ids = (*retired, "minimaxai/minimax-m3.1-flash", "stepfun-ai/step-5-preview")
+    updated, changed = merge_models(config, ids, URL)
+    assert changed == 35
+    for provider in updated["provider"].values():
+        assert set(provider["models"]) == {
+            "custom/manual", "minimaxai/minimax-m3.1-flash", "stepfun-ai/step-5-preview",
+        }
+        assert provider["options"]["apiKey"] == "private-test-value"
+    assert updated["model"] == config["model"]  # Never change a user's selection silently.
+    assert merge_models(updated, ids, URL) == (updated, 0)
+    assert merge_models(config, (), URL) == (config, 0)
+
+
+def test_current_catalog_is_curated_without_embeddings_or_retired_ids() -> None:
+    ids = tuple(MODEL_CONTEXT_LIMITS) + ("nvidia/embed-qa-4", "moonshotai/kimi-k3.1-pro")
+    updated, changed = merge_models({}, ids, URL)
+    models = updated["provider"]["nim-local"]["models"]
+    assert set(models) == module.OPENCODE_CHAT_MODELS
+    assert changed == 15
+    assert not set(models) & RETIRED_HOSTED_MODELS

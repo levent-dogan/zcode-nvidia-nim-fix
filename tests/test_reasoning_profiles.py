@@ -8,6 +8,23 @@ from nvidia_nim_proxy.sanitizer import ProviderContext, sanitize_chat_completion
 
 
 NIM = ProviderContext(provider_name="NVIDIA NIM")
+
+
+@pytest.mark.parametrize("override,expected", [
+    ({}, "high"),
+    ({"reasoning_effort": "max"}, "high"),
+    ({"reasoning_effort": "low"}, "high"),
+    ({"reasoning_effort": "none"}, "none"),
+    ({"extra_body": {"reasoning_effort": "high", "unknown": True}}, "high"),
+])
+def test_mistral_large_4_only_sends_documented_effort(
+    override: dict[str, Any], expected: str
+) -> None:
+    model = "mistralai/mistral-large-4-1t-a52b"
+    result = sanitize_chat_completion_body({"model": model, **override}, NIM)
+    assert result.body == {"model": model, "reasoning_effort": expected}
+
+
 DEEPSEEK_MODELS = [
     "deepseek-ai/deepseek-v4-pro",
     "deepseek-ai/deepseek-v4-pro-0813",

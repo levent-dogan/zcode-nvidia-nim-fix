@@ -1,13 +1,15 @@
 import argparse
+import http.client
 import io
 import json
+import socket
+import sys
 import time
 from threading import Event, Thread
 from typing import Any, cast
 
 import pytest
 
-import nvidia_nim_proxy.server as server_module
 from nvidia_nim_proxy.sanitizer import ProviderContext, sanitize_chat_completion_body
 from nvidia_nim_proxy.server import (
     API_KEY_MODE_CLIENT,
@@ -252,11 +254,7 @@ def test_build_upstream_request_pool_override_never_forwards_local_key() -> None
 def test_main_rejects_local_proxy_key_reused_as_nvidia_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        server_module,
-        "parse_args",
-        lambda: argparse.Namespace(api_key_mode=API_KEY_MODE_POOL, debug=False),
-    )
+    monkeypatch.setattr(sys, "argv", ["zcode-nim-proxy", "--api-key-mode", API_KEY_MODE_POOL])
     monkeypatch.setenv("NIM_PROXY_CLIENT_KEY", "shared-secret")
     monkeypatch.setenv("NVIDIA_API_KEY_1", "shared-secret")
 
@@ -264,6 +262,13 @@ def test_main_rejects_local_proxy_key_reused_as_nvidia_key(
         SystemExit,
         match="NIM_PROXY_CLIENT_KEY must be different",
     ):
+        main()
+
+
+@pytest.mark.parametrize("mode", [API_KEY_MODE_ENV, API_KEY_MODE_CLIENT])
+def test_main_rejects_retry_loop_outside_pool(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    monkeypatch.setattr(sys, "argv", ["zcode-nim-proxy", "--api-key-mode", mode, "--pool-retry-loop"])
+    with pytest.raises(SystemExit, match="--pool-retry-loop requires --api-key-mode pool"):
         main()
 
 
@@ -326,6 +331,7 @@ def _run_fake_pool_forward(
 ) -> tuple[list[UpstreamRequest], list[int], list[tuple[int, str]]]:
     handler = cast(Any, object.__new__(NIMProxyHandler))
     handler.config = _pool_config()
+    handler._client_disconnected = lambda: False
     requests: list[UpstreamRequest] = []
     relayed: list[int] = []
     errors: list[tuple[int, str]] = []
@@ -471,6 +477,114 @@ def test_direct_mode_maps_upstream_connection_reset_to_502() -> None:
     assert errors == [(502, "upstream_request_failed")]
 
 
+def test_direct_mode_handles_truncated_response_without_traceback() -> None:
+    handler = cast(Any, object.__new__(NIMProxyHandler))
+    handler.config = ProxyConfig("https://integrate.api.nvidia.com/v1", "test-key")
+    connection = _FakeConnection()
+    request = build_upstream_chat_request({"model": "test", "messages": []}, handler.config)
+    handler._open_upstream_attempt = lambda _: UpstreamAttempt(
+        connection=cast(Any, connection), response=cast(Any, _FakeResponse(200)),
+        request=request, elapsed_ms=1,
+    )
+    errors: list[int] = []
+    handler._send_proxy_error = lambda status, **_: errors.append(status)
+
+    def truncated(*args: Any, **kwargs: Any) -> None:
+        raise http.client.IncompleteRead(b"partial-response")
+
+    handler._relay_upstream_response = truncated
+    handler._perform_direct_attempt({}, request)
+    assert errors == [502]
+    assert connection.closed
+
+
+@pytest.mark.parametrize("mode", ["env", "client", "pool"])
+def test_dns_error_is_specific_does_not_rotate_and_releases_lease(
+    mode: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    handler = cast(Any, object.__new__(NIMProxyHandler))
+    handler._client_disconnected = lambda: False
+    handler.config = _pool_config() if mode == "pool" else ProxyConfig(
+        upstream_base_url="https://integrate.api.nvidia.com/v1",
+        api_key="test-env-secret" if mode == "env" else None,
+        api_key_mode=mode,
+    )
+    requests: list[UpstreamRequest] = []
+    errors: list[tuple[int, str, str]] = []
+
+    def fail_open(request: UpstreamRequest) -> UpstreamAttempt:
+        requests.append(request)
+        raise socket.gaierror(11001, "private-message-and-key-must-not-be-logged")
+
+    def send_error(status: int, *, code: str, message: str) -> None:
+        errors.append((status, code, message))
+
+    handler._open_upstream_attempt = fail_open
+    handler._send_proxy_error = send_error
+    handler._forward_to_nim(
+        {"model": "deepseek-ai/deepseek-v4.1-flash", "messages": [], "stream": True},
+        client_authorization=(
+            "Bearer local-proxy-secret" if mode == "pool" else "Bearer test-client-secret"
+        ),
+    )
+    assert len(requests) == 1
+    assert errors[0][:2] == (502, "upstream_dns_error")
+    assert "DNS" in errors[0][2]
+    assert "private-message-and-key" not in caplog.text
+    assert "test-client-secret" not in caplog.text
+    assert "test-env-secret" not in caplog.text
+    assert "event=failover" not in caplog.text
+    if mode == "pool":
+        # DNS failure must not quarantine/cool a key or retain its active slot.
+        pool = handler.config.key_pool
+        state = pool.snapshot()
+        assert state.active == state.queued == state.cooling_down == state.quarantined == 0
+        assert state.available == state.total
+        lease = pool.acquire(frozenset())
+        lease.release()
+
+
+@pytest.mark.parametrize("failure", [TimeoutError, ConnectionResetError])
+def test_non_dns_transport_failover_remains_bounded(failure: type[OSError]) -> None:
+    handler = cast(Any, object.__new__(NIMProxyHandler))
+    handler._client_disconnected = lambda: False
+    handler.config = _pool_config(keys=("fake-one", "fake-two", "fake-three"))
+    calls: list[UpstreamRequest] = []
+    errors: list[tuple[int, str]] = []
+
+    def fail_open(request: UpstreamRequest) -> UpstreamAttempt:
+        calls.append(request)
+        raise failure("test transport error")
+
+    def send_error(status: int, *, code: str, message: str) -> None:
+        errors.append((status, code))
+
+    handler._open_upstream_attempt = fail_open
+    handler._send_proxy_error = send_error
+    handler._forward_to_nim(
+        {"model": "test", "messages": []},
+        client_authorization="Bearer local-proxy-secret",
+    )
+    assert len(calls) == 2  # Default max_5xx_failovers remains one alternate key.
+    expected = (504, "upstream_timeout") if failure is TimeoutError else (
+        502, "upstream_request_failed"
+    )
+    assert errors == [expected]
+    assert handler.config.key_pool.snapshot().active == 0
+
+
+def test_dns_error_after_response_start_does_not_send_second_response() -> None:
+    handler = cast(Any, object.__new__(NIMProxyHandler))
+    handler._client_response_started = True
+    handler._send_proxy_error = lambda *args, **kwargs: pytest.fail("second response")
+    request = build_upstream_chat_request(
+        {"model": "test", "messages": [], "stream": True},
+        ProxyConfig(upstream_base_url="https://integrate.api.nvidia.com/v1", api_key="fake"),
+    )
+    handler._handle_relay_transport_error({}, request, socket.gaierror(11001, "private"))
+    assert handler.close_connection is True
+
+
 def test_transport_error_after_response_start_only_closes_connection() -> None:
     handler = cast(Any, object.__new__(NIMProxyHandler))
     handler._client_response_started = True
@@ -522,6 +636,7 @@ def test_client_mode_serializes_same_key_across_handler_threads() -> None:
 
     def make_handler(name: str) -> Any:
         handler = cast(Any, object.__new__(NIMProxyHandler))
+        handler._client_disconnected = lambda: False
         handler.config = config
         handler._send_proxy_error = lambda *args, **kwargs: None
 

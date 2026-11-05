@@ -114,6 +114,8 @@ def test_real_http_pool_cycles_six_keys_and_sanitizes_requests() -> None:
     "model",
     [
         "moonshotai/kimi-k3",
+        "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        "mistralai/mistral-large-4-1t-a52b",
         "deepseek-ai/deepseek-v4-flash-0731",
         "z-ai/glm-5.3",
         "z-ai/glm-5.3-flash",
@@ -227,7 +229,7 @@ def test_reasoning_profiles_over_http_preserve_tools_and_responses(
     body = {
         "model": model,
         "messages": messages,
-        "max_tokens": 1024,
+        "max_completion_tokens": 1024,
         "stream": stream,
         "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
         "tool_choice": "auto",
@@ -262,9 +264,14 @@ def test_reasoning_profiles_over_http_preserve_tools_and_responses(
     assert forwarded["messages"] == messages
     assert forwarded["tools"] == body["tools"]
     assert forwarded["stream"] == stream
+    assert forwarded["max_tokens"] == 1024
+    assert "max_completion_tokens" not in forwarded
+    assert "Mapped NVIDIA NIM request keys: max_completion_tokens->max_tokens" in caplog.text
     assert "extra_body" not in forwarded
     if model == "moonshotai/kimi-k3":
         assert forwarded["reasoning_effort"] == "max"
+    elif model in ("nvidia/nemotron-3.5-super-vl-120b-a12b", "mistralai/mistral-large-4-1t-a52b"):
+        assert forwarded["reasoning_effort"] == "high"
     elif model.startswith("deepseek-ai/"):
         assert forwarded["chat_template_kwargs"] == {"thinking": True, "reasoning_effort": "max"}
         assert "reasoning_effort" not in forwarded

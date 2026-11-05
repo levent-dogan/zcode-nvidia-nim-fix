@@ -1,3 +1,5 @@
+import pytest
+
 from nvidia_nim_proxy.sanitizer import (
     NVIDIA_NIM_SAFE_CHAT_FIELDS,
     ProviderContext,
@@ -6,10 +8,69 @@ from nvidia_nim_proxy.sanitizer import (
 )
 
 
+@pytest.mark.parametrize("stream", [True, False])
+def test_nvidia_maps_completion_budget_without_mutating_input(stream: bool) -> None:
+    body = {
+        "model": "deepseek-ai/deepseek-v4.1-flash",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": stream,
+        "max_completion_tokens": 16384,
+    }
+    result = sanitize_chat_completion_body(body, ProviderContext(provider_name="nvidia"))
+    assert result.body["max_tokens"] == 16384
+    assert "max_completion_tokens" not in result.body
+    assert result.body["stream"] is stream
+    assert result.mapped_keys == ("max_completion_tokens->max_tokens",)
+    assert result.stripped_keys == ()
+    assert body["max_completion_tokens"] == 16384
+    assert "max_tokens" not in body
+
+
+def test_canonical_max_tokens_wins_over_alias() -> None:
+    body = {"max_tokens": 128, "max_completion_tokens": 4096}
+    result = sanitize_chat_completion_body(body, ProviderContext(provider_name="nvidia"))
+    assert result.body == {"max_tokens": 128}
+    assert result.mapped_keys == ()
+    assert result.stripped_keys == ("max_completion_tokens",)
+
+
+def test_non_nvidia_completion_budget_is_not_renamed() -> None:
+    body = {"max_completion_tokens": 4096}
+    result = sanitize_chat_completion_body(body, ProviderContext(provider_name="openai"))
+    assert result.body == body
+    assert result.mapped_keys == ()
+
+
 def test_detects_nvidia_nim_by_base_url() -> None:
     context = ProviderContext(base_url="https://integrate.api.nvidia.com/v1")
 
     assert is_nvidia_nim_provider(context) is True
+
+
+@pytest.mark.parametrize("effort,expected", [
+    (None, "high"), ("max", "high"), ("high", "high"), ("low", "low"), ("none", "none"),
+])
+def test_super_vl_uses_only_documented_hosted_efforts(effort: str | None, expected: str) -> None:
+    body = {
+        "model": "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        "reasoning_effort": effort,
+        "extra_body": {"unknown": True},
+    }
+    result = sanitize_chat_completion_body(body, ProviderContext(provider_name="nvidia"))
+    assert result.body["reasoning_effort"] == expected
+    assert "extra_body" not in result.body
+    assert "chat_template_kwargs" not in result.body
+
+
+@pytest.mark.parametrize("model", [
+    "minimaxai/minimax-m3.1-flash", "stepfun-ai/step-5-preview",
+    "nvidia/nemotron-3.5-bolt-e4b", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+])
+def test_new_models_without_verified_effort_override_keep_native_default(model: str) -> None:
+    body = {"model": model, "reasoning_effort": "max", "stream": True}
+    result = sanitize_chat_completion_body(body, ProviderContext(provider_name="nvidia"))
+    assert result.body == {"model": model, "stream": True}
+    assert result.stripped_keys == ("reasoning_effort",)
 
 
 def test_detects_nvidia_nim_by_provider_name() -> None:

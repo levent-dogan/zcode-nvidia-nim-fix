@@ -44,6 +44,7 @@ class SanitizedRequest:
     body: dict[str, Any]
     stripped_keys: tuple[str, ...]
     reasoning_policy: str | None = None
+    mapped_keys: tuple[str, ...] = ()
 
 
 def _requested_effort(body: Mapping[str, Any], profile: ReasoningProfile) -> tuple[Any, str | None]:
@@ -146,8 +147,17 @@ def sanitize_chat_completion_body(
         else:
             stripped.add(key)
 
+    mapped: tuple[str, ...] = ()
+    if "max_tokens" not in body and "max_completion_tokens" in body:
+        # Preserve the client's generation budget using NVIDIA's documented name.
+        # Like max_tokens, its value remains subject to upstream validation.
+        cleaned["max_tokens"] = body["max_completion_tokens"]
+        stripped.discard("max_completion_tokens")
+        mapped = ("max_completion_tokens->max_tokens",)
+
     policy = _apply_reasoning_profile(body, cleaned, stripped, profile) if profile else None
 
     return SanitizedRequest(
-        body=cleaned, stripped_keys=tuple(sorted(stripped)), reasoning_policy=policy
+        body=cleaned, stripped_keys=tuple(sorted(stripped)), reasoning_policy=policy,
+        mapped_keys=mapped,
     )

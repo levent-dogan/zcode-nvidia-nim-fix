@@ -71,6 +71,14 @@ def test_round_robin_selection_cycles_from_sixth_key_back_to_first() -> None:
     ]
 
 
+def test_cancellable_standard_wait_retains_its_deadline() -> None:
+    pool = _pool(("test-key",), queue_wait_seconds=0.02)
+    with pool.acquire(frozenset()):
+        with pytest.raises(PoolWaitTimeoutError):
+            pool.acquire(frozenset(), cancelled=lambda: False)
+    assert pool.snapshot().queued == pool.snapshot().active == 0
+
+
 def test_busy_keys_are_skipped_and_waiting_request_is_admitted() -> None:
     pool = _pool(("key-one", "key-two"))
     first = pool.acquire(frozenset())

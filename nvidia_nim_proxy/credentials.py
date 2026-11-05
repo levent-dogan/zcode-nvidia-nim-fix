@@ -95,7 +95,7 @@ class CredentialBroker:
         if (
             supplied is None
             or expected is None
-            or not hmac.compare_digest(supplied, expected)
+            or not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
         ):
             raise PermissionError("invalid local proxy bearer token")
 

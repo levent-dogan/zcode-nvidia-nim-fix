@@ -7,6 +7,10 @@ from collections import deque
 from dataclasses import dataclass, field
 from threading import Condition
 from types import TracebackType
+from typing import Callable
+
+
+CANCEL_POLL_SECONDS = 0.25
 
 
 class QueueFullError(RuntimeError):
@@ -19,6 +23,10 @@ class QueueFullError(RuntimeError):
 
 class QueueWaitTimeoutError(TimeoutError):
     """Raised when a queued request is not admitted before its deadline."""
+
+
+class QueueCancelledError(RuntimeError):
+    """Raised when the client no longer needs the queued request."""
 
 
 @dataclass(frozen=True)
@@ -104,13 +112,17 @@ class RequestScheduler:
         self._lanes: dict[str, _Lane] = {}
         self._queued = 0
 
-    def acquire(self, fingerprint: str, model: str) -> QueueLease:
+    def acquire(
+        self, fingerprint: str, model: str, *, cancelled: Callable[[], bool] | None = None
+    ) -> QueueLease:
         """Acquire a slot immediately or wait in the fingerprint's FIFO lane."""
 
         started_at = time.monotonic()
         deadline = started_at + self.queue_wait_seconds
 
         with self._condition:
+            if cancelled is not None and cancelled():
+                raise QueueCancelledError("client disconnected")
             lane = self._lanes.setdefault(fingerprint, _Lane())
             if (
                 lane.active < self.max_concurrent_per_key
@@ -134,19 +146,22 @@ class RequestScheduler:
             self._queued += 1
             queue_position = len(lane.waiters)
 
-            while (
-                lane.waiters[0] is not ticket
-                or lane.active >= self.max_concurrent_per_key
-            ):
+            while True:
+                if cancelled is not None and cancelled():
+                    self._remove_waiter(fingerprint, lane, ticket)
+                    raise QueueCancelledError("client disconnected")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._remove_waiter(fingerprint, lane, ticket)
                     raise QueueWaitTimeoutError("request queue wait timed out")
-                self._condition.wait(remaining)
+                if lane.waiters[0] is ticket and lane.active < self.max_concurrent_per_key:
+                    break
+                self._condition.wait(min(remaining, CANCEL_POLL_SECONDS) if cancelled else remaining)
 
             lane.waiters.popleft()
             self._queued -= 1
             lane.active += 1
+            self._condition.notify_all()
             return QueueLease(
                 scheduler=self,
                 fingerprint=fingerprint,

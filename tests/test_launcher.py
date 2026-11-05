@@ -93,6 +93,7 @@ def test_launcher_disables_discovery(tmp_path: Path) -> None:
     [
         "-ApiKeyMode Client -DisableModelDiscovery -OpenCodeConfig opencode.json",
         "-ApiKeyMode Client -ModelRefreshSeconds 0",
+        "-ApiKeyMode Client -PoolRetryLoop",
         "-ApiKeyMode Env",
     ],
 )
@@ -117,9 +118,9 @@ def test_pool_launcher_does_not_forward_or_print_keys(tmp_path: Path) -> None:
     assert upstream_key not in result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("mode", ["pool", "client"])
+@pytest.mark.parametrize("mode", ["pool", "client", "loop", "debug", "generic"])
 @pytest.mark.parametrize("exit_code", [0, 7])
-def test_debug_batch_launchers_sync_from_other_directory(
+def test_debug_batch_launchers_from_other_directory(
     tmp_path: Path, mode: str, exit_code: int
 ) -> None:
     repo = tmp_path / "proxy launch ! (test)"
@@ -128,7 +129,10 @@ def test_debug_batch_launchers_sync_from_other_directory(
     outside.mkdir()
     profile = tmp_path / "user ! profile (test)"
     profile.mkdir()
-    name = f"start_proxy_{mode}_debug.bat"
+    name = {
+        "loop": "start_proxy_pool_loop.bat", "debug": "start_proxy_debug.bat",
+        "generic": "start_proxy.bat",
+    }.get(mode, f"start_proxy_{mode}_debug.bat")
     for filename in (name, "run_proxy.ps1"):
         shutil.copyfile(ROOT / filename, repo / filename)
     activation = repo / ".venv" / "Scripts" / "Activate.ps1"
@@ -148,8 +152,11 @@ function global:python {
         encoding="utf-8",
     )
     env = {**os.environ, "USERPROFILE": str(profile), "PROXY_TEST_EXIT_CODE": str(exit_code)}
+    command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/v:off", "/c", str(repo / name)]
+    if mode == "generic":
+        command += ["-ApiKeyMode", "Client", "-DebugMode", "-UpstreamTimeoutSeconds", "600"]
     result = subprocess.run(
-        [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/v:off", "/c", str(repo / name)],
+        command,
         cwd=outside,
         env=env,
         capture_output=True,
@@ -158,12 +165,18 @@ function global:python {
         check=False,
     )
     args = forwarded(result, exit_code)
-    assert args[args.index("--api-key-mode") + 1] == mode
-    assert "--debug" in args
-    assert args[args.index("--upstream-timeout-seconds") + 1] == 600
-    assert args[args.index("--opencode-config") + 1] == str(
-        profile / ".config" / "opencode" / "opencode.json"
+    assert args[args.index("--api-key-mode") + 1] == (
+        "client" if mode in {"client", "generic"} else "pool"
     )
+    assert "--debug" in args
+    assert ("--pool-retry-loop" in args) == (mode == "loop")
+    assert args[args.index("--upstream-timeout-seconds") + 1] == (120 if mode == "loop" else 600)
+    if mode in {"loop", "debug", "generic"}:
+        assert "--opencode-config" not in args
+    else:
+        assert args[args.index("--opencode-config") + 1] == str(
+            profile / ".config" / "opencode" / "opencode.json"
+        )
     assert "LAUNCH_CWD:" + str(repo) in result.stdout
     assert "test-local-secret" not in result.stdout + result.stderr
     assert "test-upstream-secret" not in result.stdout + result.stderr

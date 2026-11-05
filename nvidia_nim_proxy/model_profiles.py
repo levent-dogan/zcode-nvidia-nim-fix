@@ -35,6 +35,12 @@ _GLM_53 = ReasoningProfile(location="provider_default", efforts=frozenset(), def
 _GPT_OSS = ReasoningProfile(location="body", efforts=frozenset({"low", "medium", "high"}))
 
 NVIDIA_REASONING_PROFILES = {
+    "mistralai/mistral-large-4-1t-a52b": ReasoningProfile(
+        location="body", efforts=frozenset({"none", "high"}), default="high",
+    ),
+    "nvidia/nemotron-3.5-super-vl-120b-a12b": ReasoningProfile(
+        location="body", efforts=frozenset({"none", "low", "high"}), default="high",
+    ),
     "moonshotai/kimi-k3": _KIMI_K3,
     "z-ai/glm-5.3": _GLM_53,
     "z-ai/glm-5.3-flash": _GLM_53,

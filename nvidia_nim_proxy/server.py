@@ -7,11 +7,16 @@ import http.client
 import ipaddress
 import json
 import logging
+import math
 import os
+import select
+import socket
+import ssl
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import BoundedSemaphore
 from typing import Any, Callable
 from urllib.parse import ParseResult, urlparse
 
@@ -26,15 +31,19 @@ from nvidia_nim_proxy.credentials import (
     load_pool_keys,
 )
 from nvidia_nim_proxy.key_pool import (
+    POOL_CANCEL_POLL_SECONDS,
+    POOL_RETRYABLE_STATUSES,
     NvidiaKeyPool,
     PoolQueueFullError,
     PoolUnavailableError,
+    PoolWaitCancelledError,
     PoolWaitTimeoutError,
 )
 from nvidia_nim_proxy.model_catalog import DEFAULT_REFRESH_SECONDS, ModelCatalog
 from nvidia_nim_proxy.opencode_sync import OpenCodeModelSync
 from nvidia_nim_proxy.sanitizer import ProviderContext, sanitize_chat_completion_body
 from nvidia_nim_proxy.scheduler import (
+    QueueCancelledError,
     QueueFullError,
     QueueWaitTimeoutError,
     RequestScheduler,
@@ -51,6 +60,7 @@ DEFAULT_MAX_TOTAL_QUEUED = 32
 DEFAULT_QUEUE_WAIT_SECONDS = 180
 DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 60
 DEFAULT_MAX_5XX_FAILOVERS = 1
+POOL_RETRY_MAX_BACKOFF_SECONDS = 30
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
 STREAM_CHUNK_SIZE = 8192
 STREAM_DIAGNOSTIC_SCAN_BYTES = 8 * 1024
@@ -66,6 +76,7 @@ HOP_BY_HOP_RESPONSE_HEADERS = {
     "upgrade",
 }
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
+UPSTREAM_TRANSPORT_ERRORS = (OSError, http.client.HTTPException)
 TOOL_CALL_LEAK_MARKERS = (b"<tool_call", b"</tool_call", b"&lt;tool_call", b"&lt;/tool_call")
 TOOL_CALL_TEXT_DIAGNOSTIC = (
     "Provider/model compatibility issue: NVIDIA NIM returned tool-call markup as normal "
@@ -75,6 +86,14 @@ TOOL_CALL_TEXT_DIAGNOSTIC = (
 )
 
 logger = logging.getLogger("zcode-nim-proxy")
+
+
+def finite_json_float(value: str) -> float:
+    """Reject non-finite JSON extensions and overflowing numeric literals."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
 
 
 class ProxyConfig:
@@ -96,9 +115,12 @@ class ProxyConfig:
         rate_limit_cooldown_seconds: int = DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS,
         max_5xx_failovers: int = DEFAULT_MAX_5XX_FAILOVERS,
         model_catalog: ModelCatalog | None = None,
+        pool_retry_loop: bool = False,
     ) -> None:
         normalized_upstream_base_url = upstream_base_url.rstrip("/")
         validate_upstream_base_url(normalized_upstream_base_url)
+        if pool_retry_loop and api_key_mode != API_KEY_MODE_POOL:
+            raise ValueError("pool retry loop requires Pool API key mode")
         self.upstream_base_url = normalized_upstream_base_url
         self.api_key = api_key
         self.tool_call_text_mode = tool_call_text_mode
@@ -124,9 +146,15 @@ class ProxyConfig:
                 queue_wait_seconds=queue_wait_seconds,
                 default_cooldown_seconds=rate_limit_cooldown_seconds,
                 max_5xx_failovers=max_5xx_failovers,
+                honor_retryable_5xx_retry_after=pool_retry_loop,
             )
             if api_key_mode == API_KEY_MODE_POOL
             else None
+        )
+        # Between rounds a request holds neither a key lease nor a queue ticket.
+        self.pool_retry_slots = (
+            BoundedSemaphore(max_total_queued + len(pool_keys) * max_concurrent_per_key)
+            if pool_retry_loop else None
         )
 
 
@@ -324,10 +352,28 @@ def parse_completed_sse_events(payload: bytes) -> list[bytes]:
     return [event for event in parts[:-1] if event.strip()]
 
 
+def contains_tool_call_text_leak_in_completion(payload: bytes) -> bool:
+    """Inspect assistant content, never structured tool arguments or reasoning."""
+    try:
+        decoded = json.loads(payload)
+    except (ValueError, RecursionError):
+        return False
+    if not isinstance(decoded, dict) or not isinstance(decoded.get("choices"), list):
+        return False
+    for choice in decoded["choices"]:
+        message = choice.get("message") if isinstance(choice, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str) and contains_tool_call_text_leak(
+            content.encode("utf-8", errors="replace")
+        ):
+            return True
+    return False
+
+
 def contains_tool_call_text_leak_in_sse(payload: bytes) -> bool:
     """Detect a tool-call text marker even when content spans SSE events."""
 
-    content_fragments: list[str] = []
+    content_fragments: dict[int, list[str]] = {}
     for event in parse_completed_sse_events(payload):
         for line in event.splitlines():
             if not line.startswith(b"data:"):
@@ -337,7 +383,7 @@ def contains_tool_call_text_leak_in_sse(payload: bytes) -> bool:
                 continue
             try:
                 decoded = json.loads(data)
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except (ValueError, RecursionError):
                 continue
             if not isinstance(decoded, dict):
                 continue
@@ -347,14 +393,20 @@ def contains_tool_call_text_leak_in_sse(payload: bytes) -> bool:
             for choice in choices:
                 if not isinstance(choice, dict):
                     continue
+                index = choice.get("index", 0)
+                if type(index) is not int:
+                    continue
                 delta = choice.get("delta")
                 if not isinstance(delta, dict):
                     continue
                 content = delta.get("content")
                 if isinstance(content, str):
-                    content_fragments.append(content)
+                    content_fragments.setdefault(index, []).append(content)
 
-    return contains_tool_call_text_leak("".join(content_fragments).encode("utf-8"))
+    return any(
+        contains_tool_call_text_leak("".join(fragments).encode("utf-8", errors="replace"))
+        for fragments in content_fragments.values()
+    )
 
 
 def read_stream_prefix_for_tool_call_detection(
@@ -362,7 +414,7 @@ def read_stream_prefix_for_tool_call_detection(
     *,
     max_scan_bytes: int = STREAM_DIAGNOSTIC_SCAN_BYTES,
 ) -> StreamPrefixScan:
-    """Read at most the first SSE event without delaying the full stream."""
+    """Inspect a bounded SSE prefix for markup in assistant content only."""
 
     buffered = bytearray()
 
@@ -378,9 +430,7 @@ def read_stream_prefix_for_tool_call_detection(
 
         buffered.extend(chunk)
         buffered_bytes = bytes(buffered)
-        if contains_tool_call_text_leak(buffered_bytes) or contains_tool_call_text_leak_in_sse(
-            buffered_bytes
-        ):
+        if contains_tool_call_text_leak_in_sse(buffered_bytes):
             return StreamPrefixScan(
                 buffered=bytes(buffered),
                 tool_call_text_leak=True,
@@ -551,6 +601,8 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
         )
         sanitized = sanitize_chat_completion_body(request_body, context)
 
+        if sanitized.mapped_keys:
+            logger.info("Mapped NVIDIA NIM request keys: %s", ", ".join(sanitized.mapped_keys))
         if sanitized.stripped_keys:
             logger.info(
                 "Stripped unsupported NVIDIA NIM request keys: %s",
@@ -593,8 +645,11 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
 
         raw_body = self.rfile.read(content_length)
         try:
-            decoded = json.loads(raw_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            decoded = json.loads(
+                raw_body.decode("utf-8"), parse_float=finite_json_float,
+                parse_constant=finite_json_float,
+            )
+        except (ValueError, RecursionError) as exc:
             raise ValueError("invalid JSON request body") from exc
 
         if not isinstance(decoded, dict):
@@ -608,17 +663,14 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
         *,
         client_authorization: str | None,
     ) -> None:
-        if self.config.api_key_mode == API_KEY_MODE_POOL:
-            self._forward_from_pool(
-                body,
-                client_authorization=client_authorization,
-            )
-            return
-
-        self._forward_direct(
-            body,
-            client_authorization=client_authorization,
-        )
+        try:
+            if self.config.api_key_mode == API_KEY_MODE_POOL:
+                self._forward_from_pool(body, client_authorization=client_authorization)
+            else:
+                self._forward_direct(body, client_authorization=client_authorization)
+        except (QueueCancelledError, PoolWaitCancelledError):
+            self.close_connection = True
+            logger.info("Queue event=client_disconnected model=%r", body.get("model"))
 
     def _forward_direct(
         self,
@@ -659,6 +711,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             lease = self.config.request_scheduler.acquire(
                 upstream_request.api_key_fingerprint,
                 model,
+                cancelled=self._client_disconnected,
             )
         except QueueFullError as exc:
             logger.warning(
@@ -698,6 +751,8 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             lease.wait_ms,
         )
         try:
+            if self._client_disconnected():
+                raise QueueCancelledError("client disconnected before upstream attempt")
             self._perform_direct_attempt(body, upstream_request)
         finally:
             lease.release()
@@ -714,7 +769,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
     ) -> None:
         try:
             attempt = self._open_upstream_attempt(upstream_request)
-        except (TimeoutError, OSError) as exc:
+        except UPSTREAM_TRANSPORT_ERRORS as exc:
             self._handle_relay_transport_error(body, upstream_request, exc)
             return
 
@@ -729,7 +784,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                 attempt.response,
                 stream=upstream_request.stream,
             )
-        except (TimeoutError, OSError) as exc:
+        except UPSTREAM_TRANSPORT_ERRORS as exc:
             self._handle_relay_transport_error(body, upstream_request, exc)
         finally:
             attempt.connection.close()
@@ -761,13 +816,65 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             )
             return
 
+        loop_slots = self.config.pool_retry_slots
+        if loop_slots is None:
+            self._run_pool_request(body, key_pool, retry_loop=False)
+        elif loop_slots.acquire(blocking=False):
+            try:
+                self._run_pool_request(body, key_pool, retry_loop=True)
+            finally:
+                loop_slots.release()
+        else:
+            self._send_proxy_error(
+                429,
+                code="proxy_queue_full",
+                message="NVIDIA key pool retry loop capacity is full",
+                retry_after="5",
+            )
+
+    def _client_disconnected(self) -> bool:
+        # Probe without consuming client bytes or writing headers that would commit a retry.
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable and not self.connection.recv(1, socket.MSG_PEEK))
+        except (OSError, ValueError):
+            return True
+
+    def _wait_for_pool_retry_round(self, seconds: int) -> bool:
+        deadline = time.monotonic() + seconds
+        while not self._client_disconnected():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            time.sleep(min(remaining, POOL_CANCEL_POLL_SECONDS))
+        return False
+
+    def _run_pool_request(
+        self, body: dict[str, Any], key_pool: NvidiaKeyPool, *, retry_loop: bool
+    ) -> None:
         model = str(body.get("model", ""))
         attempted: set[str] = set()
         five_xx_failovers = 0
+        backoff_seconds = 2
 
         while True:
+            if (
+                retry_loop
+                and attempted
+                and not key_pool.has_untried_candidate(frozenset(attempted))
+                and key_pool.has_untried_candidate(frozenset())
+            ):
+                logger.info("Queue event=retry_round model=%r backoff_seconds=%s", model, backoff_seconds)
+                if not self._wait_for_pool_retry_round(backoff_seconds):
+                    raise PoolWaitCancelledError("client disconnected during retry backoff")
+                attempted.clear()
+                backoff_seconds = min(backoff_seconds * 2, POOL_RETRY_MAX_BACKOFF_SECONDS)
             try:
-                lease = key_pool.acquire(frozenset(attempted))
+                lease = key_pool.acquire(
+                    frozenset(attempted),
+                    cancelled=self._client_disconnected,
+                    wait_forever=retry_loop,
+                )
             except PoolQueueFullError:
                 logger.warning("Queue event=queue_full scope=pool model=%r", model)
                 self._send_proxy_error(
@@ -786,6 +893,9 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                 )
                 return
             except PoolUnavailableError:
+                if retry_loop and attempted and key_pool.has_untried_candidate(frozenset()):
+                    # A different request may have quarantined the last untried key.
+                    continue
                 logger.warning("Queue event=pool_unavailable model=%r", model)
                 self._send_proxy_error(
                     503,
@@ -809,6 +919,8 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             )
             attempt: UpstreamAttempt | None = None
             try:
+                if self._client_disconnected():
+                    raise PoolWaitCancelledError("client disconnected before upstream attempt")
                 try:
                     upstream_request = build_upstream_chat_request(
                         body,
@@ -824,13 +936,21 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     attempt = self._open_upstream_attempt(upstream_request)
-                except (TimeoutError, OSError) as exc:
+                except UPSTREAM_TRANSPORT_ERRORS as exc:
+                    if isinstance(exc, socket.gaierror) or (retry_loop and isinstance(exc, ssl.SSLError)):
+                        # DNS/TLS failures are shared by every key.
+                        self._handle_relay_transport_error(body, upstream_request, exc)
+                        return
                     can_failover = (
-                        five_xx_failovers < key_pool.max_5xx_failovers
-                        and key_pool.has_untried_candidate(frozenset(attempted))
+                        retry_loop
+                        or (
+                            five_xx_failovers < key_pool.max_5xx_failovers
+                            and key_pool.has_untried_candidate(frozenset(attempted))
+                        )
                     )
                     if can_failover:
-                        five_xx_failovers += 1
+                        if not retry_loop:
+                            five_xx_failovers += 1
                         logger.warning(
                             (
                                 "Queue event=failover reason=transport_error model=%r "
@@ -863,21 +983,28 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                     return
 
                 retry_after = attempt.response.getheader("Retry-After")
+                status = attempt.response.status
+                if self._client_disconnected():
+                    lease.release(status=status, retry_after=retry_after)
+                    raise PoolWaitCancelledError("client disconnected during upstream attempt")
                 self._log_upstream_response(
                     attempt.response,
                     body=body,
                     upstream_request=upstream_request,
                     elapsed_ms=attempt.elapsed_ms,
                 )
-                should_failover = (
-                    key_pool.should_failover(
-                        attempt.response.status,
-                        five_xx_failovers=five_xx_failovers,
+                if retry_loop:
+                    should_failover = status in POOL_RETRYABLE_STATUSES or (
+                        status in {401, 403}
+                        and key_pool.has_untried_candidate(frozenset({lease.fingerprint}))
                     )
-                    and key_pool.has_untried_candidate(frozenset(attempted))
-                )
+                else:
+                    should_failover = (
+                        key_pool.should_failover(status, five_xx_failovers=five_xx_failovers)
+                        and key_pool.has_untried_candidate(frozenset(attempted))
+                    )
                 if should_failover:
-                    if 500 <= attempt.response.status <= 599:
+                    if not retry_loop and 500 <= status <= 599:
                         five_xx_failovers += 1
                     logger.warning(
                         (
@@ -900,7 +1027,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                         attempt.response,
                         stream=upstream_request.stream,
                     )
-                except (TimeoutError, OSError) as exc:
+                except UPSTREAM_TRANSPORT_ERRORS as exc:
                     if self._client_response_has_started():
                         self._handle_relay_transport_error(
                             body,
@@ -914,12 +1041,19 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                         return
 
                     can_failover = (
-                        200 <= attempt.response.status <= 299
-                        and five_xx_failovers < key_pool.max_5xx_failovers
-                        and key_pool.has_untried_candidate(frozenset(attempted))
+                        200 <= status <= 299
+                        and (not retry_loop or not isinstance(exc, ssl.SSLError))
+                        and (
+                            retry_loop
+                            or (
+                                five_xx_failovers < key_pool.max_5xx_failovers
+                                and key_pool.has_untried_candidate(frozenset(attempted))
+                            )
+                        )
                     )
                     if can_failover:
-                        five_xx_failovers += 1
+                        if not retry_loop:
+                            five_xx_failovers += 1
                         logger.warning(
                             (
                                 "Queue event=failover reason=response_read_error model=%r "
@@ -946,9 +1080,11 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
                 )
                 return
             finally:
-                if attempt is not None:
-                    attempt.connection.close()
-                lease.release_if_active()
+                try:
+                    if attempt is not None:
+                        attempt.connection.close()
+                finally:
+                    lease.release_if_active()
                 logger.info(
                     "Queue event=released scope=pool model=%r api_key_fingerprint=%s",
                     model,
@@ -1016,7 +1152,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
         self,
         body: dict[str, Any],
         upstream_request: UpstreamRequest,
-        exc: OSError,
+        exc: OSError | http.client.HTTPException,
     ) -> None:
         if self._client_response_has_started():
             logger.error(
@@ -1037,7 +1173,17 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             upstream_request,
             error=exc.__class__.__name__,
         )
-        if isinstance(exc, TimeoutError):
+        if isinstance(exc, socket.gaierror):
+            self._send_proxy_error(
+                502,
+                code="upstream_dns_error",
+                message=(
+                    "Cannot resolve the NVIDIA NIM upstream hostname. Check this "
+                    "computer's DNS and network connection; switching API keys "
+                    "does not fix DNS resolution."
+                ),
+            )
+        elif isinstance(exc, TimeoutError):
             self._send_proxy_error(
                 504,
                 code="upstream_timeout",
@@ -1086,7 +1232,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
     ) -> None:
         if not stream:
             response_body = upstream_response.read()
-            if contains_tool_call_text_leak(response_body):
+            if contains_tool_call_text_leak_in_completion(response_body):
                 logger.warning(
                     "Upstream response contains plain-text tool_call tags. "
                     "This usually means the selected model is not emitting real OpenAI tool_calls."
@@ -1165,7 +1311,7 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
             if (
                 warn_on_tool_call_text
                 and not tool_call_warning_logged
-                and contains_tool_call_text_leak(chunk)
+                and contains_tool_call_text_leak_in_sse(chunk)
             ):
                 logger.warning(
                     "Streaming response contains plain-text tool_call tags. "
@@ -1349,6 +1495,11 @@ def parse_args() -> argparse.Namespace:
         help="Alternate NVIDIA keys tried after an upstream 5xx or transport error.",
     )
     parser.add_argument(
+        "--pool-retry-loop",
+        action="store_true",
+        help="Retry transient failures across successive key rounds while the client waits (pool only).",
+    )
+    parser.add_argument(
         "--allow-remote",
         action="store_true",
         help="Allow binding to a non-loopback host. Unsafe with env API key mode.",
@@ -1371,6 +1522,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.pool_retry_loop and args.api_key_mode != API_KEY_MODE_POOL:
+        raise SystemExit("--pool-retry-loop requires --api-key-mode pool")
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -1429,6 +1582,7 @@ def main() -> None:
             rate_limit_cooldown_seconds=args.rate_limit_cooldown_seconds,
             max_5xx_failovers=args.max_5xx_failovers,
             model_catalog=catalog,
+            pool_retry_loop=args.pool_retry_loop,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -1457,10 +1611,12 @@ def main() -> None:
         args.max_concurrent_per_key,
         args.max_queue_per_key,
         args.max_total_queued,
-        args.queue_wait_seconds,
+        "until client disconnects" if args.pool_retry_loop else args.queue_wait_seconds,
     )
     if args.api_key_mode == API_KEY_MODE_POOL:
         logger.info("Loaded NVIDIA key pool entries: %s", len(pool_keys))
+    if args.pool_retry_loop:
+        logger.info("Pool retry loop enabled: no round or elapsed time limit; Ctrl+C to stop")
     if not is_loopback_host(args.host):
         logger.warning(
             "Remote %s-mode proxy binding enabled on %s; use TLS termination and firewall controls",

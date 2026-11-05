@@ -95,7 +95,7 @@ Create a custom **OpenAI-compatible / Chat Completions** provider:
 | Base URL | `http://127.0.0.1:18787/v1` |
 | Endpoint | `/chat/completions` |
 | API key | Credential for the mode selected above |
-| Model ID | For example, `z-ai/glm-5.3` or another supported NVIDIA chat model |
+| Model ID | For example, `mistralai/mistral-large-4-1t-a52b` or another supported NVIDIA chat model |
 
 Some clients append `/v1` themselves. In that case configure `http://127.0.0.1:18787`; the final path arriving at the proxy must be `/v1/chat/completions`. The same local URL can serve several IDE projects. If you deliberately run a second proxy, use a different `NIM_PROXY_PORT` and matching client URL.
 
@@ -116,7 +116,7 @@ The proxy can add current, documented Chat Completions models to `nim-local` whe
   -OpenCodeConfig "$HOME\.config\opencode\opencode.json"
 ```
 
-Wait for `Model catalog refreshed` and `OpenCode model sync complete`, then reopen OpenCode. Sync preserves selected model, credentials, and non-DeepSeek manual entries; it removes obsolete DeepSeek entries and adds the current V4.1 Flash ID under `nim-local` and any existing `nvidia_nim_1` through `nvidia_nim_6` providers that point to the official NVIDIA endpoint. Other providers are untouched. It only uses a successful public catalog refresh, not a stale cache. The live `/v1/models` feed includes embedding, safety, and other non-chat models, so the OpenCode list is intentionally limited to documented chat models; it is not every catalog ID. It accepts **strict JSON** at the selected path; JSONC, malformed files, duplicate properties, symlinks, or a provider with a conflicting endpoint are rejected. Before changing an existing file, it stores a private backup under `%LOCALAPPDATA%\zcode-nvidia-nim-fix\opencode-backups`. Keep those backups private because your existing config may contain credentials.
+Wait for `Model catalog refreshed` and `OpenCode model sync complete`, then reopen OpenCode. Sync adds reviewed chat models and removes the retired hosted IDs listed below. It also removes known legacy DeepSeek entries when they are absent from the current catalog, but preserves unknown manually added models. Credentials, the selected default, and other providers remain unchanged. It uses a successful public catalog refresh, not a stale cache. It accepts **strict JSON** at the selected path; JSONC, malformed files, duplicate properties, symlinks, or a provider with a conflicting endpoint are rejected. Before changing an existing file, it stores a backup under `%LOCALAPPDATA%\zcode-nvidia-nim-fix\opencode-backups`.
 
 ### Six Direct NVIDIA Providers
 
@@ -124,25 +124,53 @@ You may additionally configure `nvidia_nim_1` through `nvidia_nim_6` as separate
 
 ### Model Context Limits and Automatic Compaction
 
-Reviewed **2026-10-04**. Previously, model sync assigned every model a generic
+Reviewed **2026-11-05** against the live public catalog and NVIDIA model/API pages.
+Previously, model sync assigned every model a generic
 `131072` context and `16384` output budget and skipped existing entries. This
 made OpenCode compact much earlier than documented for larger-context models.
 The [limit registry](nvidia_nim_proxy/model_limits.py) now uses exact model IDs:
 
 | Model ID | Configured context (tokens) | Configured output budget | NVIDIA source |
 | --- | ---: | ---: | --- |
-| `z-ai/glm-5.3` | 1,048,576 | 16,384 | [Model card](https://docs.api.nvidia.com/nim/reference/z-ai-glm-5-3) |
+| `mistralai/mistral-large-4-1t-a52b` | 262,144 | 16,384 | [Hosted page](https://build.nvidia.com/mistralai/mistral-large-4-1t-a52b), [API](https://docs.api.nvidia.com/nim/reference/mistralai-mistral-large-4-1t-a52b-infer) |
 | `z-ai/glm-5.3-flash` | 1,048,576 | 16,384 | [Model card](https://docs.api.nvidia.com/nim/reference/z-ai-glm-5-3-flash) |
-| `moonshotai/kimi-k3` | 1,048,576 | 16,384 | [Model card](https://docs.api.nvidia.com/nim/reference/moonshotai-kimi-k3) |
+| `minimaxai/minimax-m3.1-flash` | 262,144 | 16,384 | [Hosted page](https://build.nvidia.com/minimaxai/minimax-m3.1-flash), [API](https://docs.api.nvidia.com/nim/reference/minimaxai-minimax-m3-1-flash-infer) |
+| `stepfun-ai/step-5-preview` | 1,000,000 | 16,384 | [Model card](https://build.nvidia.com/stepfun-ai/step-5-preview/modelcard), [API](https://docs.api.nvidia.com/nim/reference/stepfun-ai-step-5-preview-infer) |
 | `deepseek-ai/deepseek-v4.1-flash` | 1,048,576 | 16,384 | [Model card](https://build.nvidia.com/deepseek-ai/deepseek-v4.1-flash/modelcard) |
 | `moonshotai/kimi-k2.6` | 262,144 | 16,384 | [Model card](https://docs.api.nvidia.com/nim/reference/moonshotai-kimi-k2-6) |
 | `google/gemma-4-31b-it` | 262,144 | 16,384 | [Model card](https://docs.api.nvidia.com/nim/reference/google-gemma-4-31b-it) |
 | `poolside/laguna-xs-2.1` | 262,144 | 16,384 | [Model card](https://docs.api.nvidia.com/nim/reference/poolside-laguna-xs-2-1) |
-| `nvidia/nemotron-3-super-120b-a12b` | 1,048,576 | 16,384 | [Model card](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3-super-120b-a12b) |
+| `nvidia/nemotron-3.5-super-vl-120b-a12b` | 1,000,000 | 16,384 | [Model card](https://build.nvidia.com/nvidia/nemotron-3.5-super-vl-120b-a12b/modelcard), [API](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3_5-super-vl-120b-a12b-infer) |
+| `nvidia/nemotron-3.5-bolt-e4b` | 65,536 | 16,384 | [Hosted context limit](https://build.nvidia.com/nvidia/nemotron-3.5-bolt-e4b/modelcard) |
+| `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | 262,144 | 16,384 | [Model card](https://build.nvidia.com/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning/modelcard) |
 | `nvidia/nemotron-3-ultra-550b-a55b` | 1,048,576 | 16,384 | [Model card](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3-ultra-550b-a55b) |
 | `nvidia/nemotron-3.5-lightning-30b-a3b` | 1,048,576 | 16,384 | [Model card](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3-5-lightning-30b-a3b), [NVIDIA's exact 1M recipe](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/blob/main/README.md) |
 | `meta/muse-glimmer-30b` | 131,072 | 16,384 | [Model card](https://docs.api.nvidia.com/nim/reference/meta-muse-glimmer-30b) |
 | `openai/gpt-oss-20b` | 131,072 | 4,096 | Hosted validation reported 131,072; [output schema](https://docs.api.nvidia.com/nim/reference/openai-gpt-oss-20b-infer) |
+
+The reviewed OpenCode shortlist currently contains **15** chat models, intersected
+with each successful public catalog refresh. Embedding, reward and safety models
+are not coding-agent choices and are not automatically added. Audio/video input
+support is not implied by a text-chat model entry.
+
+The free endpoints for [Kimi K3](https://build.nvidia.com/moonshotai/kimi-k3/build),
+[Nemotron 3 Super](https://build.nvidia.com/nvidia/nemotron-3-super-120b-a12b/build),
+and [GLM 5.3](https://build.nvidia.com/z-ai/glm-5-3/build)
+are marked **Deprecated**. Sync removes these exact IDs from `nim-local` and
+existing `nvidia_nim_1` through `nvidia_nim_6`, even if a deprecated ID lingers in
+the upstream catalog. It does not change your selected default model: if it points
+to a removed endpoint, select a current model after reopening OpenCode. A failed
+or empty refresh never deletes configuration. Unrelated manual models remain.
+
+[Kimi K3.1 Pro](https://build.nvidia.com/moonshotai/kimi-k3_1-pro) is currently
+Playground-only according to its API example, so sync does not add it. Document
+parsing, embedding and reranking endpoints are likewise not added as chat models.
+
+The MiniMax M3.1 Flash and Mistral Large 4 model cards describe 1M checkpoints,
+but their hosted Build pages advertise 262K. The registry uses the smaller hosted value until
+NVIDIA resolves the discrepancy or your deployment verifies a larger window.
+New model cards that say only 1M use a conservative 1,000,000-token value rather
+than assuming 1,048,576. Explicit manual limits remain protected as described below.
 
 **Evidence boundary:** most context values above are documented model capacities,
 not independently verified maximum-length hosted requests. Small synthetic
@@ -208,10 +236,14 @@ cannot restore detail already removed by an earlier compaction.
 
    ```powershell
    Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json | Out-Null
-   opencode models nim-local --pure
+   opencode models
    ```
 
-   Substitute `nvidia_nim_1` or another provider ID in the last command as needed. Seeing a model in the list confirms configuration loading, **not** successful inference. Test with a short prompt.
+   OpenCode 2.2 uses `opencode models` without a positional provider or `--pure`.
+   Look for `nim-local/` and `nvidia_nim_1/` through `nvidia_nim_6/` prefixes in
+   the output. Older clients may offer different filtering flags; consult
+   `opencode models --help`. Seeing a model in the list confirms configuration
+   loading, **not** successful inference. Test with a short prompt.
 
 If a provider disappears, inspect `disabled_providers` and any duplicate provider definition in `opencode.jsonc`, project config, or other OpenCode configuration sources. OpenCode can disable a provider after **Disconnect** even though its model entries remain in `opencode.json`. The local credential file `%USERPROFILE%\.local\share\opencode\auth.json` is for authentication; model entries do not belong there.
 
@@ -221,7 +253,10 @@ The proxy recognizes exact IDs in [the reasoning profile registry](nvidia_nim_pr
 
 | Model ID | No effort selected in client | Explicit supported values |
 | --- | --- | --- |
-| `moonshotai/kimi-k3` | Sends top-level `reasoning_effort: "max"` | `low`, `high`, `max` |
+| `moonshotai/kimi-k3` (retired free endpoint; legacy requests only) | Sends top-level `reasoning_effort: "max"` | `low`, `high`, `max` |
+| `nvidia/nemotron-3.5-super-vl-120b-a12b` | Sends top-level `reasoning_effort: "high"`, its highest documented effort | `none`, `low`, `high` |
+| `mistralai/mistral-large-4-1t-a52b` | Sends top-level `reasoning_effort: "high"`, its highest documented effort | `none`, `high` |
+| MiniMax M3.1 Flash, Step 5 Preview, Nemotron 3.5 Bolt and Nano Omni | Uses hosted native default; no unverified `max` parameter | No effort override enabled |
 | `z-ai/glm-5.3`, `z-ai/glm-5.3-flash` | Uses NVIDIA's documented native `max` default; sends no unverified wire override | None enabled for hosted API |
 | `deepseek-ai/deepseek-v4.1-flash` | Uses hosted default; NVIDIA's model page does not document a hosted `max` request field, so the proxy does not invent one | No verified hosted override |
 | Retired DeepSeek V4 Pro/Flash IDs, if manually requested | Legacy mapping remains for compatibility, but these IDs are not synced into OpenCode and may be unavailable upstream | `none`, `high`, `max` |
@@ -229,6 +264,14 @@ The proxy recognizes exact IDs in [the reasoning profile registry](nvidia_nim_pr
 | Other models, including GLM 5.2 | Uses provider default; strips unknown effort fields | No guessed override |
 
 For Kimi K3, the proxy also removes sampling fields NVIDIA documents as fixed. An explicit valid effort takes precedence over a profile default. Missing or unsupported values fall back to that profile's default. It never inserts a textual `/max` command into your prompt. `max` effort can increase latency; it does not change `max_tokens` or context length.
+
+MiniMax's model card lists five effort levels, but its current [hosted API
+schema](https://docs.api.nvidia.com/nim/reference/minimaxai-minimax-m3-1-flash-infer)
+does not expose that override. Step 5 documents always-on reasoning but no numeric
+effort selector. These models therefore use native defaults rather than a guessed
+wire format. For Super VL the [hosted schema](https://docs.api.nvidia.com/nim/reference/nvidia-nemotron-3_5-super-vl-120b-a12b-infer)
+explicitly supports top-level `reasoning_effort`; the proxy defaults to `high`.
+Direct `nvidia_nim_1` through `nvidia_nim_6` requests bypass this proxy mapping.
 
 NVIDIA describes the GLM 5.3 model's default as `max`, but its [hosted request documentation](https://docs.api.nvidia.com/nim/reference/z-ai-glm-5-3-infer) has not been verified here to accept a per-request effort override. The proxy leaves that native default in place. DeepSeek V4.1 Flash's [model page](https://build.nvidia.com/deepseek-ai/deepseek-v4.1-flash) discusses high-effort evaluation, but its hosted example does not specify an effort parameter. Until NVIDIA publishes or a live test confirms the hosted wire format, selecting `Max` in OpenCode cannot be guaranteed for that model. Other models without a verified `max` capability use their provider default. References: [GLM 5.3 model card](https://build.nvidia.com/z-ai/glm-5-3/modelcard), [Kimi K3 API](https://docs.api.nvidia.com/nim/reference/moonshotai-kimi-k3-infer), and [NVIDIA model catalog](https://build.nvidia.com/models). A configured profile does not make a retired or inaccessible endpoint work.
 
@@ -250,7 +293,7 @@ Start the proxy in your chosen mode in one terminal. In another terminal, check 
 Invoke-RestMethod http://127.0.0.1:18787/health
 
 $body = @{
-  model = 'z-ai/glm-5.3'
+  model = 'mistralai/mistral-large-4-1t-a52b'
   messages = @(@{ role = 'user'; content = 'Say hello in one sentence.' })
   stream = $false
   max_tokens = 128
@@ -292,7 +335,7 @@ On Windows, `WinError 10013` during startup can mean the listening port is reser
 .\run_proxy.ps1 -ApiKeyMode Pool -OpenCodeConfig "$HOME\.config\opencode\opencode.json"
 ```
 
-`start_proxy.bat` forwards arguments to the PowerShell launcher. `-DebugMode` logs stripped **field names** and policy decisions without printing keys or full messages. `-ToolCallTextMode pass` relays raw model-generated `<tool_call>` text; the default `diagnostic` mode replaces that markup with a readable diagnostic instead of treating it as an executable tool call.
+`start_proxy.bat` forwards arguments to the PowerShell launcher. `-DebugMode` logs stripped **field names** and policy decisions without printing keys or full messages. `-ToolCallTextMode pass` relays raw model-generated `<tool_call>` text; the default `diagnostic` mode replaces that markup in assistant text with a readable diagnostic. Structured tool arguments are preserved, including file content containing those tags.
 
 | Parameter | Default | Purpose |
 | --- | --- | --- |
@@ -300,12 +343,13 @@ On Windows, `WinError 10013` during startup can mean the listening port is reser
 | `-MaxConcurrentPerKey` | `1` | Active requests per key |
 | `-MaxQueuePerKey` | `4` | Waiting requests per key in Env/Client mode |
 | `-MaxTotalQueued` | `32` | Total queued requests |
-| `-QueueWaitSeconds` | `180` | Maximum queue wait |
+| `-QueueWaitSeconds` | `180` | Maximum queue wait in standard modes |
 | `-RateLimitCooldownSeconds` | `60` | Fallback cooldown if NVIDIA omits `Retry-After` |
-| `-Max5xxFailovers` | `1` | Alternate pool keys after upstream `5xx`/transport error |
+| `-Max5xxFailovers` | `1` | Alternate pool keys after upstream `5xx`/transport error in standard Pool mode |
+| `-PoolRetryLoop` | off | Pool only: retry transient failures in successive key rounds while the client stays connected |
 | `-ModelRefreshSeconds` | `21600` | Public catalog refresh interval; minimum `30` |
 | `-DisableModelDiscovery` | off | Disable `/v1/models` discovery |
-| `-OpenCodeConfig` | unset | Opt in to add-only `nim-local` sync in a strict JSON file |
+| `-OpenCodeConfig` | unset | Sync reviewed NVIDIA models in a strict OpenCode JSON file |
 
 Queue defaults are conservative. Higher concurrency can increase NVIDIA `429` responses. The underlying Python CLI uses lower-case flags such as `--api-key-mode pool`, `--upstream-timeout-seconds 600`, `--opencode-config PATH`, and `--no-model-discovery`. Additional environment overrides include `NIM_PROXY_HOST`, `NIM_PROXY_PORT`, and `NIM_PROXY_UPSTREAM_BASE_URL`.
 
@@ -321,9 +365,82 @@ Queue defaults are conservative. Higher concurrency can increase NVIDIA `429` re
 | `504 proxy_queue_timeout` | Request waited past the configured queue limit; check active work and retry later. |
 | `504 upstream_timeout` | NVIDIA did not start responding before the upstream timeout; try a shorter request or another model. Client-side timeouts can be shorter than the proxy setting. |
 | NVIDIA `500`/`5xx` | Upstream error; Pool mode permits bounded failover before streaming starts. Repeated failures across keys may indicate model or platform availability trouble. |
+| `502 upstream_dns_error` / `gaierror` | This computer could not resolve the upstream hostname. No model request reached NVIDIA. Repair host DNS/network connectivity; changing keys, models or timeouts cannot fix DNS. The proxy does not fail over keys for this error. |
 | Plain-text `<tool_call>` shown as a diagnostic | The model returned text rather than structured OpenAI `tool_calls`; choose a model/profile supporting structured tools. |
-| `Client disconnected` log | IDE closed the connection before the proxy could send its final response; a proxy crash is not implied. |
+| `Client disconnected` log | IDE closed the connection. Queued requests are removed in every mode; no further upstream attempts are started for that request. |
 
-Same-key requests use FIFO queues; different healthy keys can work in parallel. In Pool mode, a key is tried at most once per request. NVIDIA `408`/`429` cools a key, `401`/`403` quarantines it until restart, and `400`/`404`/`422` does not trigger key switching. After an SSE stream starts, the proxy cannot safely retry it on another key. When failover is exhausted, the last upstream response is returned so the client sees its real status.
+Same-key requests use FIFO queues; different healthy keys can work in parallel. In standard Pool mode, a key is tried at most once per request. NVIDIA `408`/`429` cools a key, `401`/`403` quarantines it until restart, and `400`/`404`/`422` does not trigger key switching. After an SSE stream starts, the proxy cannot safely retry it on another key. When standard failover is exhausted, the last upstream response is returned so the client sees its real status.
 
 `GET /health` exposes aggregate queue and pool counts, not credential values. Restarting the proxy clears its in-memory queue but does not erase NVIDIA rate limits or any in-flight work already sent upstream.
+
+### Full-Loop Pool Launcher
+
+1. Stop the existing proxy with `Ctrl+C`. Reuse the same private Pool `.env`.
+2. From PowerShell run `.\start_proxy_pool_loop.bat`. It enables debug-safe logging and a 120-second upstream socket timeout per attempt. It does not write OpenCode settings.
+3. In OpenCode GUI or CLI, select your **local Pool provider** (`nim-local`), not a direct NVIDIA provider. Keep the local `/v1` URL and the local `NIM_PROXY_CLIENT_KEY` already configured. Use `Ctrl+C` in the proxy console to stop the proxy.
+
+Equivalent PowerShell command (change the per-attempt timeout here if needed):
+
+```powershell
+.\run_proxy.ps1 -ApiKeyMode Pool -PoolRetryLoop -DebugMode -UpstreamTimeoutSeconds 120
+```
+
+On `408`, `429`, `500`, `502`, `503`, `504`, `529`, or a transient transport error before the client response, the proxy tries the next eligible key. After a full pass it starts another round with backoff from 2 to 30 seconds. It skips quarantined keys and honors upstream `Retry-After` cooldowns. DNS/TLS errors and permanent request errors are returned instead of looping. Queue capacity still applies; admitted requests have no overall retry or queue wait deadline in this mode.
+
+This retries one live HTTP request, not an entire coding session. OpenCode can still stop or time out while waiting for response headers; once it disconnects the proxy will not start another attempt. An upstream attempt already in progress can run until its socket returns or times out. A partial response is never replayed on another key. NVIDIA may already have received or processed an attempt even when no output reached the IDE. Multiple keys do not override shared NVIDIA quotas or service outages.
+
+### DNS Failure Before NVIDIA Receives the Request
+
+The hosted
+[DeepSeek V4.1 Flash API](https://docs.api.nvidia.com/nim/reference/nvidia-deepseek-v4_1-flash-infer)
+and [Mistral Large 4 API](https://docs.api.nvidia.com/nim/reference/mistralai-mistral-large-4-1t-a52b-infer)
+still use `https://integrate.api.nvidia.com/v1/chat/completions` and `max_tokens`.
+A failed DNS lookup happens before authentication or model validation. A public
+website loading over IPv6 does not prove that the API's network path works.
+
+Availability is separate from model capacity. Cached catalog entries and configured
+model profiles do not guarantee continued hosted access. The proxy does not
+redirect requests to paid partners or change credentials. After connectivity is
+restored, refresh the public catalog and test the specific model and account.
+
+Run these read-only checks from PowerShell:
+
+```powershell
+Resolve-DnsName integrate.api.nvidia.com
+Get-NetAdapter | Format-Table Name, Status
+Get-NetIPConfiguration
+Get-NetIPInterface -AddressFamily IPv4 | Format-Table InterfaceAlias, Dhcp, ConnectionState
+Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0'
+Test-NetConnection integrate.api.nvidia.com -Port 443
+.\.venv\Scripts\python.exe -c "import socket; print(socket.getaddrinfo('integrate.api.nvidia.com', 443))"
+```
+
+An IPv4 address in `169.254.0.0/16` is link-local, not a working Internet address.
+If the active Wi-Fi adapter has DHCP disabled, no IPv4 gateway, and the only
+default route belongs to disconnected Ethernet, fix the host connection before
+retrying the proxy. Do not reset all adapters, hard-code NVIDIA IPs, disable TLS,
+or change API keys as a workaround.
+
+**Only if that adapter is intended to use DHCP**, an administrator can restore
+DHCP with the following commands. Replace `YOUR_ACTIVE_ADAPTER` with the actual
+adapter name. Do not run this on an intentionally static/corporate configuration
+without checking its network requirements. The proxy never runs these commands:
+
+```powershell
+Set-NetIPInterface -InterfaceAlias 'YOUR_ACTIVE_ADAPTER' -AddressFamily IPv4 -Dhcp Enabled
+ipconfig /renew "YOUR_ACTIVE_ADAPTER"
+```
+
+Repeat the DNS, Python and TCP 443 checks. Once they pass, restart the proxy and
+wait for `Model catalog refreshed` before testing a short chat request. A stale
+catalog is retained on refresh failure; it is not proof of current availability.
+
+### OpenCode Output-Token Parameter Compatibility
+
+Some OpenAI-compatible clients send `max_completion_tokens`. For NVIDIA requests
+the sanitizer maps it to the documented `max_tokens` name, preserving its value
+and leaving validation to the upstream API. If both fields are supplied,
+`max_tokens` wins. The alias itself is never forwarded. Logs name the mapping,
+not its value or message content. Non-NVIDIA sanitizer behavior is unchanged.
+This mapping does not enlarge context or change reasoning effort; it prevents
+silently discarding the client's requested output budget.
