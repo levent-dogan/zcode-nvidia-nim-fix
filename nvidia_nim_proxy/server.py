@@ -14,6 +14,7 @@ import socket
 import ssl
 import time
 from dataclasses import dataclass
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import BoundedSemaphore
@@ -39,7 +40,11 @@ from nvidia_nim_proxy.key_pool import (
     PoolWaitCancelledError,
     PoolWaitTimeoutError,
 )
-from nvidia_nim_proxy.model_catalog import DEFAULT_REFRESH_SECONDS, ModelCatalog
+from nvidia_nim_proxy.model_catalog import (
+    DEFAULT_REFRESH_SECONDS,
+    ModelCatalog,
+    fetch_nvidia_catalog,
+)
 from nvidia_nim_proxy.opencode_sync import OpenCodeModelSync
 from nvidia_nim_proxy.sanitizer import ProviderContext, sanitize_chat_completion_body
 from nvidia_nim_proxy.scheduler import (
@@ -47,6 +52,12 @@ from nvidia_nim_proxy.scheduler import (
     QueueFullError,
     QueueWaitTimeoutError,
     RequestScheduler,
+)
+from nvidia_nim_proxy.upstream import (
+    UpstreamHTTPConnection,
+    UpstreamHTTPSConnection,
+    UpstreamProxy,
+    validate_upstream_proxy,
 )
 
 
@@ -132,6 +143,7 @@ class ProxyConfig:
         max_5xx_failovers: int = DEFAULT_MAX_5XX_FAILOVERS,
         model_catalog: ModelCatalog | None = None,
         pool_retry_loop: bool = False,
+        upstream_proxy: UpstreamProxy | None = None,
     ) -> None:
         normalized_upstream_base_url = upstream_base_url.rstrip("/")
         validate_upstream_base_url(normalized_upstream_base_url)
@@ -142,6 +154,7 @@ class ProxyConfig:
         self.tool_call_text_mode = tool_call_text_mode
         self.api_key_mode = api_key_mode
         self.upstream_timeout_seconds = upstream_timeout_seconds
+        self.upstream_proxy = upstream_proxy
         self.model_catalog = model_catalog
         self.credential_broker = CredentialBroker(
             mode=api_key_mode,
@@ -534,6 +547,11 @@ def build_health_payload(config: ProxyConfig) -> dict[str, Any]:
         "upstream": config.upstream_base_url,
         "mode": config.api_key_mode,
     }
+    if config.upstream_proxy is not None:
+        payload["upstream_proxy"] = (
+            f"{config.upstream_proxy.scheme}://"
+            f"{config.upstream_proxy.host}:{config.upstream_proxy.port}"
+        )
 
     if config.key_pool is not None:
         pool_snapshot = config.key_pool.snapshot()
@@ -1112,15 +1130,28 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
         self,
         upstream_request: UpstreamRequest,
     ) -> UpstreamAttempt:
-        connection_cls = (
-            http.client.HTTPSConnection
-            if upstream_request.use_tls
-            else http.client.HTTPConnection
-        )
-        connection = connection_cls(
-            upstream_request.netloc,
-            timeout=self.config.upstream_timeout_seconds,
-        )
+        connection: http.client.HTTPConnection
+        if self.config.upstream_proxy is not None:
+            connection_cls = (
+                UpstreamHTTPSConnection
+                if upstream_request.use_tls
+                else UpstreamHTTPConnection
+            )
+            connection = connection_cls(
+                upstream_request.netloc,
+                proxy=self.config.upstream_proxy,
+                timeout=self.config.upstream_timeout_seconds,
+            )
+        else:
+            direct_cls = (
+                http.client.HTTPSConnection
+                if upstream_request.use_tls
+                else http.client.HTTPConnection
+            )
+            connection = direct_cls(
+                upstream_request.netloc,
+                timeout=self.config.upstream_timeout_seconds,
+            )
         started_at = time.monotonic()
         try:
             connection.request(
@@ -1472,6 +1503,14 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait for NVIDIA NIM to start responding before returning 504.",
     )
     parser.add_argument(
+        "--upstream-proxy",
+        default=os.getenv("NIM_PROXY_UPSTREAM_PROXY"),
+        help=(
+            "Optional socks5://host:port or http://host:port proxy used for all "
+            "upstream traffic; the proxy resolves the NVIDIA hostname."
+        ),
+    )
+    parser.add_argument(
         "--max-concurrent-per-key",
         type=positive_int,
         default=os.getenv(
@@ -1587,6 +1626,9 @@ def main() -> None:
 
     try:
         catalog: ModelCatalog | None = None
+        upstream_proxy = (
+            validate_upstream_proxy(args.upstream_proxy) if args.upstream_proxy else None
+        )
         public_upstream = args.upstream_base_url.rstrip("/") == DEFAULT_UPSTREAM_BASE_URL
         if args.opencode_config and (args.no_model_discovery or not public_upstream):
             raise ValueError("OpenCode sync requires discovery against the public NVIDIA endpoint")
@@ -1597,7 +1639,16 @@ def main() -> None:
                 OpenCodeModelSync(args.opencode_config, f"http://{args.host}:{args.port}/v1")
                 if args.opencode_config else None
             )
-            catalog = ModelCatalog(refresh_seconds=args.model_refresh_seconds, on_refresh=sync)
+            fetcher = (
+                partial(fetch_nvidia_catalog, upstream_proxy)
+                if upstream_proxy is not None
+                else fetch_nvidia_catalog
+            )
+            catalog = ModelCatalog(
+                refresh_seconds=args.model_refresh_seconds,
+                on_refresh=sync,
+                fetcher=fetcher,
+            )
         config = ProxyConfig(
             upstream_base_url=args.upstream_base_url,
             api_key=api_key,
@@ -1614,6 +1665,7 @@ def main() -> None:
             max_5xx_failovers=args.max_5xx_failovers,
             model_catalog=catalog,
             pool_retry_loop=args.pool_retry_loop,
+            upstream_proxy=upstream_proxy,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -1637,6 +1689,8 @@ def main() -> None:
     logger.info("Plain-text tool_call handling mode: %s", args.tool_call_text_mode)
     logger.info("API key mode: %s", args.api_key_mode)
     logger.info("Upstream timeout: %s seconds", args.upstream_timeout_seconds)
+    if args.upstream_proxy:
+        logger.info("Upstream proxy: %s", args.upstream_proxy)
     logger.info(
         "Queue limits: per_key_active=%s per_key_waiting=%s total_waiting=%s wait_seconds=%s",
         args.max_concurrent_per_key,

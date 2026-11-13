@@ -1,0 +1,14 @@
+; NVIDIA NIM proxy launcher settings template. Copy this file to proxy.ini
+; (git-ignored) and edit locally. Comment lines start with ";" or "#".
+; Explicit run_proxy.ps1 parameters override these values. Keep credentials
+; in .env, never in this file.
+
+; Example: route upstream traffic through a local SOCKS proxy. Leave the
+; value empty for a direct connection.
+UpstreamProxy = socks5://127.0.0.1:10808
+
+; ApiKeyMode = Pool
+; Port = 18787
+; DebugMode = off
+; DisableModelDiscovery = off
+; ModelRefreshSeconds = 21600
