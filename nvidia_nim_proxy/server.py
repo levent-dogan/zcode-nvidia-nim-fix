@@ -1322,7 +1322,21 @@ class NIMProxyHandler(BaseHTTPRequestHandler):
         tool_call_warning_logged = False
 
         while True:
-            chunk = upstream_response.read1(STREAM_CHUNK_SIZE)
+            try:
+                chunk = upstream_response.read1(STREAM_CHUNK_SIZE)
+            except http.client.IncompleteRead as exc:
+                # The upstream dropped the chunked stream mid-answer. Response headers
+                # were already relayed, so the only correct move is to pass on the
+                # bytes that did arrive and end the response; retrying or failing over
+                # would replay nothing and lose these trailing bytes.
+                logger.warning(
+                    "NVIDIA NIM stream ended before the payload completed; relaying %s trailing bytes",
+                    len(exc.partial),
+                )
+                if exc.partial:
+                    self.wfile.write(exc.partial)
+                    self.wfile.flush()
+                return
             if not chunk:
                 break
             if (
