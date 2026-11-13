@@ -16,8 +16,12 @@ pytestmark = pytest.mark.skipif(POWERSHELL is None, reason="Windows PowerShell i
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def launch(tmp_path: Path, parameters: str) -> subprocess.CompletedProcess[str]:
+def launch(
+    tmp_path: Path, parameters: str, *, ini: str | None = None
+) -> subprocess.CompletedProcess[str]:
     shutil.copyfile(ROOT / "run_proxy.ps1", tmp_path / "run_proxy.ps1")
+    if ini is not None:
+        (tmp_path / "proxy.ini").write_text(ini, encoding="utf-8")
     activation = tmp_path / ".venv" / "Scripts" / "Activate.ps1"
     activation.parent.mkdir(parents=True, exist_ok=True)
     activation.write_text("# Isolated test activation.\n", encoding="utf-8")
@@ -42,6 +46,8 @@ def launch(tmp_path: Path, parameters: str) -> subprocess.CompletedProcess[str]:
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
         check=False,
     )
@@ -118,6 +124,53 @@ def test_pool_launcher_does_not_forward_or_print_keys(tmp_path: Path) -> None:
     assert upstream_key not in result.stdout + result.stderr
 
 
+def test_launcher_reads_proxy_ini_when_parameters_are_absent(tmp_path: Path) -> None:
+    result = launch(
+        tmp_path,
+        "",
+        ini=(
+            "# comment\n"
+            "; second comment\n"
+            "ApiKeyMode = Client\n"
+            "UpstreamProxy = socks5://127.0.0.1:10808\n"
+            "DebugMode = on\n"
+        ),
+    )
+    args = forwarded(result)
+    assert args[args.index("--api-key-mode") + 1] == "client"
+    assert args[args.index("--upstream-proxy") + 1] == "socks5://127.0.0.1:10808"
+    assert "--debug" in args
+    assert "Launcher settings loaded: proxy.ini" in result.stdout
+
+
+def test_launcher_parameters_override_proxy_ini(tmp_path: Path) -> None:
+    result = launch(
+        tmp_path,
+        "-ApiKeyMode Client",
+        ini=(
+            "ApiKeyMode = Pool\n"
+            "UpstreamProxy = socks5://127.0.0.1:10808\n"
+        ),
+    )
+    args = forwarded(result)
+    assert args[args.index("--api-key-mode") + 1] == "client"
+    assert args[args.index("--upstream-proxy") + 1] == "socks5://127.0.0.1:10808"
+
+
+def test_launcher_ignores_empty_proxy_ini_value(tmp_path: Path) -> None:
+    result = launch(tmp_path, "", ini="UpstreamProxy =\nApiKeyMode = Client\n")
+    args = forwarded(result)
+    assert "--upstream-proxy" not in args
+    assert args[args.index("--api-key-mode") + 1] == "client"
+
+
+def test_launcher_rejects_unknown_proxy_ini_key(tmp_path: Path) -> None:
+    result = launch(tmp_path, "", ini="Nonsense = 1\n")
+    assert result.returncode != 0
+    assert "LAUNCH_ARGS:" not in result.stdout
+    assert "proxy.ini" in result.stderr
+
+
 @pytest.mark.parametrize("mode", ["pool", "client", "loop", "debug", "generic"])
 @pytest.mark.parametrize("exit_code", [0, 7])
 def test_debug_batch_launchers_from_other_directory(
@@ -161,6 +214,8 @@ function global:python {
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
         check=False,
     )

@@ -340,6 +340,7 @@ On Windows, `WinError 10013` during startup can mean the listening port is reser
 | Parameter | Default | Purpose |
 | --- | --- | --- |
 | `-UpstreamTimeoutSeconds` | `300` | Wait for upstream to start responding; examples use `600` |
+| `-UpstreamProxy` | unset | Route upstream traffic through `socks5://host:port` or `http://host:port`; no TUN/VPN mode needed |
 | `-MaxConcurrentPerKey` | `1` | Active requests per key |
 | `-MaxQueuePerKey` | `4` | Waiting requests per key in Env/Client mode |
 | `-MaxTotalQueued` | `32` | Total queued requests |
@@ -351,7 +352,30 @@ On Windows, `WinError 10013` during startup can mean the listening port is reser
 | `-DisableModelDiscovery` | off | Disable `/v1/models` discovery |
 | `-OpenCodeConfig` | unset | Sync reviewed NVIDIA models in a strict OpenCode JSON file |
 
-Queue defaults are conservative. Higher concurrency can increase NVIDIA `429` responses. The underlying Python CLI uses lower-case flags such as `--api-key-mode pool`, `--upstream-timeout-seconds 600`, `--opencode-config PATH`, and `--no-model-discovery`. Additional environment overrides include `NIM_PROXY_HOST`, `NIM_PROXY_PORT`, and `NIM_PROXY_UPSTREAM_BASE_URL`.
+Queue defaults are conservative. Higher concurrency can increase NVIDIA `429` responses. The underlying Python CLI uses lower-case flags such as `--api-key-mode pool`, `--upstream-timeout-seconds 600`, `--opencode-config PATH`, and `--no-model-discovery`. Additional environment overrides include `NIM_PROXY_HOST`, `NIM_PROXY_PORT`, `NIM_PROXY_UPSTREAM_BASE_URL`, and `NIM_PROXY_UPSTREAM_PROXY`.
+
+### Route Upstream Traffic Through a Local Proxy
+
+If NVIDIA is unreachable directly, point the proxy at an existing local SOCKS5 or HTTP CONNECT proxy instead of enabling TUN/VPN mode:
+
+```powershell
+.\run_proxy.ps1 -ApiKeyMode Pool -UpstreamProxy "socks5://127.0.0.1:10808"
+```
+
+Chat requests and the model catalog both use the tunnel. SOCKS5 sends the NVIDIA hostname to the proxy, so DNS is resolved remotely and local DNS filtering does not apply. Proxy credentials, paths, query strings, and fragments are rejected; a proxy that is down surfaces as the usual upstream `502`/`504` errors.
+
+### Persistent Launcher Settings
+
+`run_proxy.ps1` reads `proxy.ini` from the repository root when present and applies it before validation, so one launch picks up mode, port, and the upstream proxy without repeated flags:
+
+```ini
+; proxy.ini
+ApiKeyMode = Pool
+UpstreamProxy = socks5://127.0.0.1:10808
+Port = 18787
+```
+
+Supported keys: `ApiKeyMode`, `ToolCallTextMode`, `UpstreamProxy`, `EnvFile`, `OpenCodeConfig`, `Host`, `Port`, `UpstreamTimeoutSeconds`, `MaxConcurrentPerKey`, `MaxQueuePerKey`, `MaxTotalQueued`, `QueueWaitSeconds`, `RateLimitCooldownSeconds`, `Max5xxFailovers`, `PoolRetryLoop`, `DisableModelDiscovery`, `ModelRefreshSeconds`, `DebugMode`. Boolean keys accept `on`/`off`. Values act as defaults: parameters passed to `run_proxy.ps1` still override them, and `Host`/`Port` respect already-set `NIM_PROXY_HOST`/`NIM_PROXY_PORT` variables. Unknown, duplicate, or out-of-range keys abort the launch. The file is git-ignored; keep credentials in `.env`, never in `proxy.ini`. Copy `proxy.ini.example` as a starting point and leave `UpstreamProxy` empty when NVIDIA is reachable directly.
 
 ## Queue, Failover, and Errors
 

@@ -18,6 +18,8 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any, Callable
 
+from nvidia_nim_proxy.upstream import UpstreamHTTPSConnection, UpstreamProxy
+
 
 CATALOG_URL = "https://integrate.api.nvidia.com/v1/models"
 DEFAULT_REFRESH_SECONDS = 6 * 60 * 60
@@ -69,10 +71,18 @@ def normalize_catalog(payload: Any) -> list[dict[str, Any]]:
     return [models[key] for key in sorted(models)]
 
 
-def fetch_nvidia_catalog() -> Any:
+def fetch_nvidia_catalog(upstream_proxy: UpstreamProxy | None = None) -> Any:
     """No keys, redirects, cookies, prompts, or key-pool requests are involved."""
-    connection = http.client.HTTPSConnection(
-        "integrate.api.nvidia.com", timeout=CATALOG_TIMEOUT_SECONDS
+    connection = (
+        UpstreamHTTPSConnection(
+            "integrate.api.nvidia.com",
+            proxy=upstream_proxy,
+            timeout=CATALOG_TIMEOUT_SECONDS,
+        )
+        if upstream_proxy is not None
+        else http.client.HTTPSConnection(
+            "integrate.api.nvidia.com", timeout=CATALOG_TIMEOUT_SECONDS
+        )
     )
     deadline = time.monotonic() + CATALOG_TIMEOUT_SECONDS
     try:
